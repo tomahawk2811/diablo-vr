@@ -1053,24 +1053,37 @@ target_include_directories(libdevilutionx PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
 
 if(DEVILUTIONX_VR)
   include(FetchContent)
-  FetchContent_Declare(OpenXR
-    URL https://github.com/KhronosGroup/OpenXR-SDK/archive/refs/tags/release-1.1.43.tar.gz
-  )
+  if(WIN32)
+    FetchContent_Declare(OpenXR
+      URL https://github.com/KhronosGroup/OpenXR-SDK/archive/refs/tags/release-1.1.43.tar.gz
+    )
+  else()
+    FetchContent_Declare(OpenXR
+      URL https://github.com/KhronosGroup/OpenXR-SDK/archive/refs/tags/release-1.1.63.tar.gz
+      URL_HASH SHA256=5b8dac0608f49498fe8e95f562fe6bcf0bc781e561f137348a8c251d06a88b6f
+    )
+  endif()
   set(DYNAMIC_LOADER OFF)
   set(BUILD_TESTS OFF)
   FetchContent_MakeAvailable(OpenXR)
-  # The loader ignores XR_RUNTIME_JSON in elevated processes, because a lower-privileged
-  # parent could have planted it. vr.cpp sets that variable itself, in-process, only to
-  # runtimes registered under HKLM, and discards an inherited value when elevated, so the
-  # check only gets in the way: without this the game cannot reach the headset's runtime
-  # when it is started as administrator.
-  set(_openxr_platform_utils "${openxr_SOURCE_DIR}/src/common/platform_utils.hpp")
-  file(READ "${_openxr_platform_utils}" _openxr_platform_utils_text)
-  string(REPLACE "if (IsHighIntegrityLevel()) {" "if (false) {" _openxr_platform_utils_patched "${_openxr_platform_utils_text}")
-  if(NOT _openxr_platform_utils_patched STREQUAL _openxr_platform_utils_text)
-    file(WRITE "${_openxr_platform_utils}" "${_openxr_platform_utils_patched}")
+  if(NOT MSVC)
+    # The loader throws and catches, whatever the game itself is built with.
+    target_compile_options(openxr_loader PRIVATE -fexceptions -frtti)
   endif()
-  target_sources(libdevilutionx PRIVATE
+  if(WIN32)
+    # The loader ignores XR_RUNTIME_JSON in elevated processes, because a lower-privileged
+    # parent could have planted it. vr.cpp sets that variable itself, in-process, only to
+    # runtimes registered under HKLM, and discards an inherited value when elevated, so the
+    # check only gets in the way: without this the game cannot reach the headset's runtime
+    # when it is started as administrator.
+    set(_openxr_platform_utils "${openxr_SOURCE_DIR}/src/common/platform_utils.hpp")
+    file(READ "${_openxr_platform_utils}" _openxr_platform_utils_text)
+    string(REPLACE "if (IsHighIntegrityLevel()) {" "if (false) {" _openxr_platform_utils_patched "${_openxr_platform_utils_text}")
+    if(NOT _openxr_platform_utils_patched STREQUAL _openxr_platform_utils_text)
+      file(WRITE "${_openxr_platform_utils}" "${_openxr_platform_utils_patched}")
+    endif()
+  endif()
+  set(_vr_sources
     platform/vr/vr.cpp
     platform/vr/xr_session.cpp
     platform/vr/xr_input.cpp
@@ -1093,8 +1106,35 @@ if(DEVILUTIONX_VR)
     platform/vr/debug/mirror.cpp
     platform/vr/debug/offscreen.cpp
     platform/vr/debug/profile.cpp)
+  if(WIN32)
+    list(APPEND _vr_sources platform/vr/xr_d3d11_win32.cpp)
+  else()
+    list(APPEND _vr_sources
+      platform/vr/dxvk/xr_d3d11_dxvk.cpp
+      platform/vr/dxvk/d3dcompiler_vkd3d.cpp)
+  endif()
+  target_sources(libdevilutionx PRIVATE ${_vr_sources})
   target_compile_definitions(libdevilutionx PUBLIC DEVILUTIONX_VR)
-  target_link_libraries(libdevilutionx PUBLIC OpenXR::openxr_loader d3d11 dxgi d3dcompiler)
+  if(WIN32)
+    target_link_libraries(libdevilutionx PUBLIC OpenXR::openxr_loader d3d11 dxgi d3dcompiler)
+  else()
+    # No Direct3D off Windows: the renderer's D3D11 is dxvk-native (on Vulkan) and its HLSL
+    # compiler is vkd3d's. tools/steam_frame/build.sh builds both; see docs/vr/steam-frame.md.
+    set(DEVILUTIONX_VR_DXVK_PREFIX "${PROJECT_SOURCE_DIR}/build-frame/dxvk-install" CACHE PATH "dxvk-native install prefix (d3d11 and dxgi)")
+    set(DEVILUTIONX_VR_VKD3D_PREFIX "/opt/vkd3d" CACHE PATH "vkd3d install prefix (static libvkd3d-shader)")
+    if(NOT EXISTS "${DEVILUTIONX_VR_DXVK_PREFIX}/include/dxvk/d3d11.h")
+      message(FATAL_ERROR "DEVILUTIONX_VR needs dxvk-native: no include/dxvk/d3d11.h under ${DEVILUTIONX_VR_DXVK_PREFIX}")
+    endif()
+    # DXVK's headers stand in for the Windows SDK's, <windows.h> included, so only the VR
+    # sources get to see them.
+    set_source_files_properties(${_vr_sources} PROPERTIES INCLUDE_DIRECTORIES
+      "${CMAKE_CURRENT_SOURCE_DIR}/platform/vr/dxvk;${DEVILUTIONX_VR_DXVK_PREFIX}/include/dxvk;${DEVILUTIONX_VR_VKD3D_PREFIX}/include/vkd3d")
+    target_link_libraries(libdevilutionx PUBLIC
+      OpenXR::openxr_loader
+      "${DEVILUTIONX_VR_DXVK_PREFIX}/lib/libdxvk_d3d11.so"
+      "${DEVILUTIONX_VR_DXVK_PREFIX}/lib/libdxvk_dxgi.so"
+      "${DEVILUTIONX_VR_VKD3D_PREFIX}/lib/libvkd3d-shader.a")
+  endif()
 endif()
 target_link_dependencies(libdevilutionx PUBLIC
   DevilutionX::SDL

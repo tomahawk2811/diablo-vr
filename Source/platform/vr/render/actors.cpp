@@ -221,6 +221,8 @@ const SpriteSlot *AddBillboard(Scene &scene, ClxSprite sprite, Point tile, Displ
  * the game says they are instead of jumping there.
  */
 std::unordered_map<const Object *, float> doorSwing;
+/** Seconds since the scene was last updated, for what moves by itself (a swinging door). */
+float frameStep;
 
 /**
  * A door: a slab 6 cm thick with the door's picture on both faces, hanging on a hinge at one end
@@ -252,7 +254,7 @@ bool AddDoor(Scene &scene, const Object &object, ClxSprite sprite)
 	const float target = open ? 1.5707963F : 0.F;
 	auto [entry, added] = doorSwing.try_emplace(&object, target);
 	float &swing = entry->second;
-	const float step = 3.2F * std::clamp(scene.time - lastTime, 0.F, 0.1F);
+	const float step = 3.2F * frameStep;
 	swing = swing < target ? std::min(swing + step, target) : std::max(swing - step, target);
 
 	Vec3 middle = TileToWorld(object.position, 0, 0);
@@ -969,6 +971,7 @@ void ActorsAddToScene(Scene &scene, const VrHandPose &leftHand, const VrHandPose
 	pickables.clear();
 	const float dt = std::clamp(scene.time - lastTime, 0.F, 0.1F);
 	lastTime = scene.time;
+	frameStep = dt;
 
 	// Weapons go to the right hand and shields to the left, whichever inventory hand slot they sit in.
 	const Item &slotLeft = MyPlayer->InvBody[INVLOC_HAND_LEFT];

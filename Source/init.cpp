@@ -204,6 +204,9 @@ void MainWndProc(const SDL_Event &event)
 #else
 	case SDL_WINDOWEVENT_FOCUS_LOST:
 #endif
+#ifdef DEVILUTIONX_VR
+		if (VrOwnsFocus()) break;
+#endif
 		if (*GetOptions().Gameplay.pauseOnFocusLoss)
 			diablo_focus_pause();
 		break;
@@ -211,6 +214,9 @@ void MainWndProc(const SDL_Event &event)
 	case SDL_EVENT_WINDOW_FOCUS_GAINED:
 #else
 	case SDL_WINDOWEVENT_FOCUS_GAINED:
+#endif
+#ifdef DEVILUTIONX_VR
+		if (VrOwnsFocus()) break;
 #endif
 		if (*GetOptions().Gameplay.pauseOnFocusLoss)
 			diablo_focus_unpause();

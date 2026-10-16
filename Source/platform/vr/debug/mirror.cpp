@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -36,6 +37,7 @@
 #include "quests.h"
 #include "stores.h"
 #include "utils/display.h"
+#include "utils/file_util.h"
 #include "utils/log.hpp"
 #include "utils/png.h"
 #include "utils/ui_fwd.h"
@@ -111,7 +113,7 @@ std::string ScreenshotDirectory()
 void SaveScreenshot(ID3D11Texture2D *texture)
 {
 	static const std::string directory = ScreenshotDirectory();
-	CreateDirectoryA(directory.c_str(), nullptr);
+	CreateDir(directory.c_str());
 	D3D11_TEXTURE2D_DESC desc;
 	texture->GetDesc(&desc);
 	desc.Usage = D3D11_USAGE_STAGING;
@@ -132,7 +134,11 @@ void SaveScreenshot(ID3D11Texture2D *texture)
 		if (opaque != nullptr) {
 			const std::time_t now = std::time(nullptr);
 			std::tm local {};
+#ifdef _WIN32
 			localtime_s(&local, &now);
+#else
+			localtime_r(&now, &local);
+#endif
 			char name[64];
 			static int serial;
 			SDL_snprintf(name, sizeof(name), "/diablo-vr-%04d%02d%02d-%02d%02d%02d-%d.png", local.tm_year + 1900, local.tm_mon + 1, local.tm_mday, local.tm_hour, local.tm_min, local.tm_sec, serial++ % 10);
@@ -162,6 +168,12 @@ bool MirrorCaptureEnabled()
  */
 void RenderMirror()
 {
+#ifndef _WIN32
+	// A standalone headset has no desktop window to look at; the pass and the readback are
+	// only worth their cost when the view is being captured.
+	if (!MirrorCaptureEnabled())
+		return;
+#endif
 	const SDL_Surface *surface = GetOutputSurface();
 	if (surface == nullptr)
 		return;
@@ -220,8 +232,13 @@ void RenderMirror()
 			// Written under another name first, so a reader never sees half a file.
 			const std::string temporary = directory + "vr-view.tmp";
 			const std::string target = directory + "vr-view.bmp";
-			if (SDL_SaveBMP(capture, temporary.c_str()) == 0)
+			if (SDL_SaveBMP(capture, temporary.c_str()) == 0) {
+#ifdef _WIN32
 				MoveFileExA(temporary.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING);
+#else
+				std::rename(temporary.c_str(), target.c_str());
+#endif
+			}
 			SDL_FreeSurface(capture);
 		}
 	}

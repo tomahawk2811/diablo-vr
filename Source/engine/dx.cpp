@@ -304,6 +304,8 @@ void RenderPresent()
 
 #ifdef DEVILUTIONX_VR
 	VrPresent(surface);
+	if (VrSkipsDesktopFrame())
+		return;
 #endif
 
 	if (!gbActive) {

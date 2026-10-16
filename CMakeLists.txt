@@ -33,7 +33,7 @@ include(functions/genex)
 option(USE_SDL1 "Use SDL1.2 instead of SDL2" OFF)
 option(USE_SDL3 "Use SDL3 instead of SDL2" OFF)
 option(NONET "Disable network support" OFF)
-cmake_dependent_option(DEVILUTIONX_VR "Build with OpenXR VR support (--vr)" OFF "WIN32;NOT USE_SDL1;NOT USE_SDL3" OFF)
+cmake_dependent_option(DEVILUTIONX_VR "Build with OpenXR VR support (--vr)" OFF "WIN32 OR CMAKE_HOST_SYSTEM_NAME STREQUAL Linux;NOT USE_SDL1;NOT USE_SDL3" OFF)
 cmake_dependent_option(PACKET_ENCRYPTION "Encrypt network packets" ON "NOT NONET" OFF)
 # The gettext[tools] package takes a very long time to install
 if(CMAKE_TOOLCHAIN_FILE MATCHES "vcpkg.cmake$")

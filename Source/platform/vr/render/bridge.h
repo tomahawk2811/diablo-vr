@@ -105,6 +105,8 @@ void LevelAddToScene(Scene &scene);
 float LevelCeilingHeight();
 /** How the opening in a wall on this tile lies: 1 = the way through runs along x (the opening spans y), 2 = along y, 0 = no such opening. */
 int LevelDoorwayAxis(Point tile);
+/** The level's `index`-th doorway built in 3D (scanning by rows), for debug cameras. False when it has fewer. */
+bool LevelBuiltDoorway(int index, Point &tile, bool &alongX);
 /** True when no light-blocking tile lies on the straight line between two points (tile units). */
 bool LevelLineOfSight(float x0, float y0, float x1, float y1);
 void LevelDumpSurfaces(const char *path);

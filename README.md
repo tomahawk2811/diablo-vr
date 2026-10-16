@@ -38,6 +38,7 @@ levels, monsters, items, quests, combat rules and save files.
 - [Getting it running](#getting-it-running)
   - [Option A: prebuilt download](#option-a-prebuilt-download)
   - [Option B: build from source](#option-b-build-from-source)
+  - [Option C: Steam Frame (standalone)](#option-c-steam-frame-standalone)
   - [Game data](#game-data)
 - [Controls](#controls)
 - [Settings](#settings)
@@ -116,6 +117,9 @@ The VR mode is an optional build flag (`DEVILUTIONX_VR`) and a launch option (`-
 - 90 Hz target, with the headset pacing the game's frames
 - Falls back gracefully: if the `vrassets` folder is missing the game still runs and shows objects
   and town as flat original sprites
+- Also runs on its own on the Valve Steam Frame, no PC needed: a Linux ARM64 build where the same
+  Direct3D 11 renderer runs on Vulkan through dxvk-native (see
+  [Option C](#option-c-steam-frame-standalone))
 
 ## Requirements
 
@@ -126,6 +130,9 @@ The VR mode is an optional build flag (`DEVILUTIONX_VR`) and a launch option (`-
 | **Controllers** | Oculus Touch layout (thumbsticks, A/B/X/Y, trigger and grip). Runtimes that remap other controllers onto the Touch profile also work. A minimal fallback exists for the generic OpenXR "simple controller" |
 | **GPU** | Direct3D 11 capable. Any card that runs PC VR is far more than enough |
 | **Game data** | `DIABDAT.MPQ` from a copy of Diablo that you own. **Not included** |
+
+That's for PC VR. The Steam Frame build runs on the headset itself; what it needs is under
+[Option C](#option-c-steam-frame-standalone).
 
 ## Getting it running
 
@@ -175,7 +182,29 @@ xcopy /e /i /y build\assets build\Release\assets
 
 The last line puts the engine's own assets (fonts, UI art, data tables) beside the executable, where
 it looks for them. The `DEVILUTIONX_SYSTEM_*=OFF` switches tell the build to compile each library itself rather than look
-for an installed one. `DEVILUTIONX_VR=ON` is the only switch that is new; it is Windows-only and needs SDL2.
+for an installed one. `DEVILUTIONX_VR=ON` is the only switch that is new. It needs SDL2, and builds on Windows and, for
+the Steam Frame, on Linux.
+
+### Option C: Steam Frame (standalone)
+
+The game runs natively on the Steam Frame as a Steam devkit title. There's no prebuilt download for
+it yet. You build it in Docker on an arm64 machine (an Apple Silicon Mac works) and copy it over
+SSH:
+
+```sh
+tools/steam_frame/build.sh image dxvk
+VR=ON tools/steam_frame/build.sh game package
+FRAME_HOST=<the Frame's name or address> tools/steam_frame/deploy.sh \
+    --data /path/to/DIABDAT.MPQ --launch-args "--vr --verbose"
+```
+
+Then start **DiabloVR** from the Steam library on the Frame. It has to be started from Steam,
+because that's what gives it the controllers. Set it to 72 Hz in SteamVR's per-application
+settings. Settings go in `~/.local/share/DiabloVR/vr-settings.env` on the Frame, which starts out
+with defaults that suit its GPU.
+
+[docs/vr/steam-frame.md](docs/vr/steam-frame.md) has the details: how it works, the Frame's
+controls and settings, and what's been measured and checked so far.
 
 ### Game data
 
@@ -230,6 +259,18 @@ The layout below uses Touch-style controller names.
 
 Everything not listed goes through DevilutionX's standard gamepad scheme, so its gamepad
 documentation applies.
+
+### On the Steam Frame
+
+The Frame's controllers have every button in their usual place, so A, B, X and Y do what they do
+above (they're all on the right controller). On top of that:
+
+| Input | Action |
+|---|---|
+| **Bumpers** | Health and mana potion from the belt. The right stick no longer drinks potions on the Frame, so turning can't cost one |
+| **D-pad** | The gamepad's D-pad in menus, the inventory and shops |
+| **View** | The gamepad's Select. Hold it for a second to recentre |
+| **Menu** (right controller) | Game menu (Escape) |
 
 ## Settings
 
@@ -289,7 +330,23 @@ start "" devilutionx.exe --vr
 | `DEVILUTIONX_VR_ASSETS` | Path of the `vrassets` folder, if it is not next to or above the executable |
 | `DEVILUTIONX_VR_SCREENSHOTS` | Folder screenshots are saved to (default: `screenshots` beside `vrassets`) |
 
-There are more, mostly for development; search the source for `DEVILUTIONX_VR_`.
+### Performance
+
+These are mostly for the Steam Frame, where its defaults come from, but they work everywhere.
+Without them everything is drawn as before.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `DEVILUTIONX_VR_MSAA` | `4` | `1` turns anti-aliasing off, which on a mobile GPU is a lot cheaper |
+| `DEVILUTIONX_VR_WALL_SHADOW_SPACING` | `0` | Tiles between the samples a pixel takes towards a light (`0`: always all 16) |
+| `DEVILUTIONX_VR_SUN_SHADOW_TAPS` | `9` | Shadow map samples in town: `9`, `4` or `1` |
+| `DEVILUTIONX_VR_DEPTH_PREPASS` | `0` | `1`: the level is drawn depth first, then shaded only where it's seen (needs MSAA off) |
+| `DEVILUTIONX_VR_BLOOM` | `1` | `0`: no glow around bright light |
+| `DEVILUTIONX_VR_EYE_SIZE` | `0` | Eye image width in pixels (`0`: what the headset recommends) |
+| `DEVILUTIONX_VR_SNAP_TURN` | `45` | Degrees of a snap turn |
+
+There are more, mostly for development; search the source for `DEVILUTIONX_VR_`, or see
+[docs/vr/steam-frame.md](docs/vr/steam-frame.md) for the ones added with the Steam Frame build.
 
 ## How it works
 
@@ -349,6 +406,9 @@ Everything specific to VR lives in one folder. The rest is upstream DevilutionX.
 Source/platform/vr/
   vr.h, vr.cpp            Public entry points, per-frame presentation, the floating screen
   vr_internal.h           Shared declarations and screen/panel tuning values
+  xr_d3d11.h              The OpenXR calls that depend on the graphics binding
+  xr_d3d11_win32.cpp      ... with Direct3D 11 on Windows
+  dxvk/                   ... with DXVK's Vulkan device on Linux, plus D3DCompile on vkd3d
   knob.h                  Environment-variable tuning values
   xr_session.cpp          OpenXR instance, runtime selection, session, swapchains
   xr_frame.cpp            Frame loop and layer composition
@@ -376,9 +436,10 @@ Source/platform/vr/
     profile.cpp/.h        Frame timing
 
 vrassets/                 Models used by the VR renderer (see below)
-docs/vr/                  Screenshots for this page
+docs/vr/                  Screenshots for this page, and steam-frame.md
 build-vr.bat              Configure and build
 play-vr.bat               Launch in the headset
+tools/steam_frame/        Steam Frame build: Docker image, build, package, deploy, launcher, tests
 ```
 
 Engine files with small VR hooks: `CMakeLists.txt`, `Source/CMakeLists.txt`, `Source/diablo.cpp`,
@@ -459,9 +520,11 @@ Delete the `build` folder and run `build-vr.bat` again. The first run needs inte
 
 This is a prototype. Honest list:
 
-- **Windows and Direct3D 11 only.** No Linux, no standalone Quest build.
+- **Windows, plus the Steam Frame.** The Frame build is Linux ARM64 through dxvk-native. Other
+  Linux setups and a standalone Quest build aren't there. The Frame build has been played in the
+  headset after its performance work and runs fine; the follow-up PRs fix what that play turned up.
 - **Tested on one setup** (Quest 2 through SteamVR). Other headsets should work through OpenXR but
-  have not been tried. Only Touch-style controller bindings exist; Index, Vive wand and WMR
+  have not been tried. Only Touch-style and Steam Frame controller bindings exist; Index, Vive wand and WMR
   controllers depend on the runtime remapping them.
 - **Single player is the focus.** Free movement is switched off in multiplayer, where the character
   steps tile to tile. Multiplayer in VR is untested, and the build script leaves ZeroTier out.

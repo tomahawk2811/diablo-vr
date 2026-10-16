@@ -73,6 +73,15 @@ XrAction xAction;
 XrAction yAction;
 XrAction menuAction;
 XrAction hapticAction;
+// Only the Steam Frame's controllers have these: they are a gamepad split over two hands.
+XrAction bumperAction;
+XrAction viewAction;
+XrAction dpadAction[4];
+/** The controllers in use are the Steam Frame's. */
+bool frameControllers;
+bool viewDown;
+bool viewRecentered;
+Uint32 viewSince;
 
 SDL_Joystick *virtualPad;
 bool mouseLeftDown;
@@ -125,6 +134,8 @@ bool panelCharacterDown;
 const float SeatedRaise = Knob("DEVILUTIONX_VR_SEATED", 0) != 0 ? Knob("DEVILUTIONX_VR_SEATED_RAISE", 0.45F) : 0.F;
 /** 1: the right stick turns smoothly instead of in 45 degree steps. */
 const bool SmoothTurn = Knob("DEVILUTIONX_VR_SMOOTH_TURN", 0) != 0;
+/** Degrees of one snap turn. */
+const float SnapTurnAngle = Knob("DEVILUTIONX_VR_SNAP_TURN", 45) * 0.0174533F;
 /** Radians per second of a smooth turn at full deflection. */
 const float SmoothTurnSpeed = Knob("DEVILUTIONX_VR_SMOOTH_TURN_SPEED", 2.0F);
 /** How dark the edge of view gets while moving or turning smoothly (0 turns the vignette off). */
@@ -137,7 +148,6 @@ const float WalkSpeed = Knob("DEVILUTIONX_VR_WALK_SPEED", 2.5F);
 const float TownPace = Knob("DEVILUTIONX_VR_TOWN_PACE", 1.5F);
 bool gliding;
 float vignetteNow;
-Uint32 lastInputTick;
 
 XrAction CreateAction(const char *name, XrActionType type, bool perHand)
 {
@@ -185,6 +195,12 @@ bool InitActions()
 	yAction = CreateAction("y", XR_ACTION_TYPE_BOOLEAN_INPUT, false);
 	menuAction = CreateAction("menu", XR_ACTION_TYPE_BOOLEAN_INPUT, false);
 	hapticAction = CreateAction("haptic", XR_ACTION_TYPE_VIBRATION_OUTPUT, true);
+	bumperAction = CreateAction("bumper", XR_ACTION_TYPE_BOOLEAN_INPUT, true);
+	viewAction = CreateAction("view", XR_ACTION_TYPE_BOOLEAN_INPUT, false);
+	dpadAction[0] = CreateAction("dpad_up", XR_ACTION_TYPE_BOOLEAN_INPUT, false);
+	dpadAction[1] = CreateAction("dpad_down", XR_ACTION_TYPE_BOOLEAN_INPUT, false);
+	dpadAction[2] = CreateAction("dpad_left", XR_ACTION_TYPE_BOOLEAN_INPUT, false);
+	dpadAction[3] = CreateAction("dpad_right", XR_ACTION_TYPE_BOOLEAN_INPUT, false);
 
 	// Touch + Khronos simple profiles only (Quest, and whatever runtimes
 	// remap onto Touch). Add Index / WMR / Vive binding tables here when needed.
@@ -220,6 +236,40 @@ bool InitActions()
 	        { hapticAction, Path("/user/hand/right/output/haptic") },
 	    });
 
+	// The Steam Frame's controllers: the D-pad and View are on the left, all four face buttons
+	// and Menu on the right. Buttons keep the names printed on them, so A, B, X and Y do what
+	// they do on Touch, and what Touch has no button for goes to the game as the gamepad's
+	// own: bumpers (the belt's potions), the D-pad and View (Select).
+	if (hasFrameControllers) {
+		SuggestBindings("/interaction_profiles/valve/frame_controller_valve",
+		    {
+		        { aimAction, Path("/user/hand/left/input/aim/pose") },
+		        { aimAction, Path("/user/hand/right/input/aim/pose") },
+		        { triggerAction, Path("/user/hand/left/input/trigger/value") },
+		        { triggerAction, Path("/user/hand/right/input/trigger/value") },
+		        { squeezeAction, Path("/user/hand/left/input/squeeze/value") },
+		        { squeezeAction, Path("/user/hand/right/input/squeeze/value") },
+		        { stickAction, Path("/user/hand/left/input/thumbstick") },
+		        { stickAction, Path("/user/hand/right/input/thumbstick") },
+		        { stickClickAction, Path("/user/hand/left/input/thumbstick/click") },
+		        { stickClickAction, Path("/user/hand/right/input/thumbstick/click") },
+		        { aAction, Path("/user/hand/right/input/a/click") },
+		        { bAction, Path("/user/hand/right/input/b/click") },
+		        { xAction, Path("/user/hand/right/input/x/click") },
+		        { yAction, Path("/user/hand/right/input/y/click") },
+		        { menuAction, Path("/user/hand/right/input/menu/click") },
+		        { viewAction, Path("/user/hand/left/input/view/click") },
+		        { bumperAction, Path("/user/hand/left/input/bumper/click") },
+		        { bumperAction, Path("/user/hand/right/input/bumper/click") },
+		        { dpadAction[0], Path("/user/hand/left/input/dpad_up/click") },
+		        { dpadAction[1], Path("/user/hand/left/input/dpad_down/click") },
+		        { dpadAction[2], Path("/user/hand/left/input/dpad_left/click") },
+		        { dpadAction[3], Path("/user/hand/left/input/dpad_right/click") },
+		        { hapticAction, Path("/user/hand/left/output/haptic") },
+		        { hapticAction, Path("/user/hand/right/output/haptic") },
+		    });
+	}
+
 	for (const Hand hand : { Left, Right }) {
 		XrActionSpaceCreateInfo spaceInfo { XR_TYPE_ACTION_SPACE_CREATE_INFO };
 		spaceInfo.action = aimAction;
@@ -233,6 +283,17 @@ bool InitActions()
 	attachInfo.countActionSets = 1;
 	attachInfo.actionSets = &actionSet;
 	return Check(xrAttachSessionActionSets(session, &attachInfo), "xrAttachSessionActionSets");
+}
+
+void ControllersChanged()
+{
+	XrInteractionProfileState profile { XR_TYPE_INTERACTION_PROFILE_STATE };
+	char name[XR_MAX_PATH_LENGTH] = "none";
+	uint32_t length = 0;
+	if (XR_SUCCEEDED(xrGetCurrentInteractionProfile(session, handPath[Right], &profile)) && profile.interactionProfile != XR_NULL_PATH)
+		xrPathToString(instance, profile.interactionProfile, sizeof(name), &length, name);
+	frameControllers = SDL_strcmp(name, "/interaction_profiles/valve/frame_controller_valve") == 0;
+	LogInfo("VR: controllers: {}", name);
 }
 
 bool InitVirtualPad()
@@ -742,6 +803,13 @@ void ButcherShortcut()
 
 void UpdateInput(XrTime time, float screenHeight)
 {
+	// The step from one frame to the next, from the times the frames are shown at. The game's
+	// own clock counts whole milliseconds, which at 72 frames a second makes every step 13 or
+	// 14 of them, and walking and turning shake by that much.
+	static XrTime lastTime;
+	const float frameStep = std::clamp(static_cast<float>(time - lastTime) * 1e-9F, 0.F, 0.05F);
+	lastTime = time;
+
 	ButcherShortcut();
 	XrActiveActionSet activeSet { actionSet, XR_NULL_PATH };
 	XrActionsSyncInfo syncInfo { XR_TYPE_ACTIONS_SYNC_INFO };
@@ -783,6 +851,22 @@ void UpdateInput(XrTime time, float screenHeight)
 		stickChord = false;
 	recenterDown = recenter;
 	automapDown = automap;
+
+	// The Frame's View button is the gamepad's Select. Held for a second it re-centres as the
+	// right stick's click does, with a buzz in both hands to say so.
+	const bool view = BoolState(viewAction);
+	if (view && !viewDown) {
+		viewSince = SDL_GetTicks();
+		viewRecentered = false;
+	}
+	if (view && !viewRecentered && SDL_GetTicks() - viewSince >= 1000) {
+		viewRecentered = true;
+		screenPlaced = false;
+		anchorPending = true;
+		Pulse(Left, 0.6F, 80);
+		Pulse(Right, 0.6F, 80);
+	}
+	viewDown = view;
 
 	// Right hand: pointer and weapon swing. While the left trigger casts, the left hand aims instead.
 	XrPosef aim;
@@ -1003,10 +1087,7 @@ void UpdateInput(XrTime time, float screenHeight)
 			const float goX = speedbookOpen ? 0 : fx * leftStick.y - fz * leftStick.x;
 			const float goZ = speedbookOpen ? 0 : fz * leftStick.y + fx * leftStick.x;
 			if (FreeMovement && !gbIsMultiplayer) {
-				static Uint32 lastGlide;
-				const Uint32 glideNow = SDL_GetTicks();
-				gliding = Glide(goX, goZ, std::clamp(static_cast<float>(glideNow - lastGlide) / 1000.F, 0.F, 0.05F));
-				lastGlide = glideNow;
+				gliding = Glide(goX, goZ, frameStep);
 			} else {
 				Walk(goX, goZ);
 			}
@@ -1021,9 +1102,7 @@ void UpdateInput(XrTime time, float screenHeight)
 	bool hotspellModifier = rightStick.y < -0.7F;
 	bool menuNavigator = rightStick.y > 0.7F;
 	if (world3d) {
-		const Uint32 now = SDL_GetTicks();
-		const float dt = std::clamp(static_cast<float>(now - lastInputTick) / 1000.F, 0.F, 0.05F);
-		lastInputTick = now;
+		const float dt = frameStep;
 		bool smoothTurning = false;
 		if (SmoothTurn) {
 			if (std::fabs(rightStick.x) > 0.25F) {
@@ -1033,11 +1112,13 @@ void UpdateInput(XrTime time, float screenHeight)
 		} else {
 			const bool turn = std::fabs(rightStick.x) > 0.7F;
 			if (turn && !turnHeld)
-				turnYaw += rightStick.x > 0 ? -SnapTurn : SnapTurn;
+				turnYaw += rightStick.x > 0 ? -SnapTurnAngle : SnapTurnAngle;
 			turnHeld = turn;
 		}
-		healthPotion = rightStick.y > 0.7F;
-		manaPotion = rightStick.y < -0.7F;
+		// With bumpers for the potions the stick is left to turning: a potion is not something
+		// to drink by accident.
+		healthPotion = !frameControllers && rightStick.y > 0.7F;
+		manaPotion = !frameControllers && rightStick.y < -0.7F;
 		hotspellModifier = menuNavigator = false;
 		// Comfort: the edge of view darkens while the view moves without the head moving it.
 		const bool moving = MyPlayer->isWalking() || gliding || smoothTurning;
@@ -1067,9 +1148,17 @@ void UpdateInput(XrTime time, float screenHeight)
 	SDL_JoystickSetVirtualButton(virtualPad, SDL_CONTROLLER_BUTTON_LEFTSTICK, automapPulse > 0 ? 1 : 0); // Automap
 	if (automapPulse > 0)
 		automapPulse--;
+	healthPotion = healthPotion || BoolState(bumperAction, handPath[Left]);
+	manaPotion = manaPotion || BoolState(bumperAction, handPath[Right]);
 	SDL_JoystickSetVirtualButton(virtualPad, SDL_CONTROLLER_BUTTON_LEFTSHOULDER, healthPotion ? 1 : 0);
 	SDL_JoystickSetVirtualButton(virtualPad, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, manaPotion ? 1 : 0);
-	SDL_JoystickSetVirtualButton(virtualPad, SDL_CONTROLLER_BUTTON_BACK, hotspellModifier ? 1 : 0);
+	SDL_JoystickSetVirtualButton(virtualPad, SDL_CONTROLLER_BUTTON_BACK, (hotspellModifier || view) ? 1 : 0);
+	// The D-pad is the gamepad's wherever the game shows its own interface: menus, the inventory's
+	// slots, shops. Out in the world it would walk the character a tile at a time under the player.
+	const bool padNavigates = !world3d || UiOpen();
+	const SDL_GameControllerButton padButtons[4] = { SDL_CONTROLLER_BUTTON_DPAD_UP, SDL_CONTROLLER_BUTTON_DPAD_DOWN, SDL_CONTROLLER_BUTTON_DPAD_LEFT, SDL_CONTROLLER_BUTTON_DPAD_RIGHT };
+	for (int i = 0; i < 4; i++)
+		SDL_JoystickSetVirtualButton(virtualPad, padButtons[i], padNavigates && BoolState(dpadAction[i]) ? 1 : 0);
 	SDL_JoystickSetVirtualButton(virtualPad, SDL_CONTROLLER_BUTTON_START, menuNavigator ? 1 : 0);
 }
 
