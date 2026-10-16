@@ -98,6 +98,11 @@ bool VrWorldPick(const float origin[3], const float direction[3], int &tileX, in
  * Reads the game's state into the scene for this frame. The head pose turns sprites towards the
  * viewer and decides what can be seen at all; hands are in world space; `pointer` draws the aim beam.
  */
+/**
+ * The time the frame about to be built is shown at, in seconds from any fixed start. Without it
+ * (no headset: the offscreen renderer) the scene runs on the game's millisecond clock.
+ */
+void VrWorldSetClock(float seconds);
 void VrWorldUpdate(const float headPosition[3], const float headOrientation[4], const VrHandPose &leftHand, const VrHandPose &rightHand, bool pointerValid, const float pointerHit[3]);
 
 /** Draws the scene of the last VrWorldUpdate, all views in one go. All targets are `width` x `height`. */

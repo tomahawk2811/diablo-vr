@@ -222,6 +222,37 @@ void PlaceScreen(XrTime time)
 	screenPlaced = true;
 }
 
+/** The game is held paused because the session lost the wearer's attention. */
+bool focusPaused;
+
+/**
+ * Losing focus means the headset came off or the system's menu is up: the player is not looking
+ * and the controllers are not ours. The game pauses the way it does when its window loses focus,
+ * sound included, and goes on by itself when focus is back. The option that governs the one
+ * governs the other.
+ */
+void UpdateFocusPause()
+{
+	// Debug runs with nobody in the headset never get focus, and have to play.
+	static const bool unattended = Knob("DEVILUTIONX_VR_FORCE_RENDER", 0) != 0 || SDL_getenv("DEVILUTIONX_VR_AUTOSTART") != nullptr || VrBenchLevel >= 0;
+	// Only once it has been focused: a session comes up unfocused, which is no loss.
+	bool away = sessionRunning && sessionWasFocused && !sessionFocused && !unattended && *GetOptions().Gameplay.pauseOnFocusLoss;
+	// Debug aid (DEVILUTIONX_VR_DEBUG_FOCUS=<seconds>): focus comes and goes by the clock, that
+	// long each, so the pause can be watched with nobody there to take the headset off.
+	static const float debugFocus = Knob("DEVILUTIONX_VR_DEBUG_FOCUS", 0);
+	if (debugFocus > 0)
+		away = sessionRunning && gbRunGame && (SDL_GetTicks() / static_cast<Uint32>(debugFocus * 1000)) % 2 == 1;
+	if (away && !focusPaused) {
+		diablo_focus_pause();
+		focusPaused = true;
+		LogVerbose("VR: out of focus, pausing (pause mode {})", PauseMode);
+	} else if (!away && focusPaused) {
+		diablo_focus_unpause();
+		focusPaused = false;
+		LogVerbose("VR: in focus again (pause mode {})", PauseMode);
+	}
+}
+
 /** Anything that needs the 2D frame in view: panels, dialogs, shops, menus, the automap. */
 bool UiOpen()
 {
@@ -236,6 +267,25 @@ using namespace vr;
 bool VrSessionRunning()
 {
 	return sessionRunning;
+}
+
+bool VrOwnsFocus()
+{
+	return VrEnabled && sessionRunning;
+}
+
+bool VrSkipsDesktopFrame()
+{
+	static const bool desktopWindow = Knob("DEVILUTIONX_VR_DESKTOP_WINDOW", 1) != 0;
+	if (desktopWindow || !sessionRunning || MirrorCaptureEnabled())
+		return false;
+	// Still a frame now and then, so that whatever watches the window sees it alive.
+	static Uint32 nextDesktopFrame;
+	if (SDL_TICKS_PASSED(SDL_GetTicks(), nextDesktopFrame)) {
+		nextDesktopFrame = SDL_GetTicks() + 1000;
+		return false;
+	}
+	return true;
 }
 
 bool VrShowsWorld()
@@ -254,6 +304,16 @@ void VrPresent(SDL_Surface *surface)
 		static Uint32 nextTap;
 		static bool returnDown;
 		if (SDL_TICKS_PASSED(SDL_GetTicks(), nextTap)) {
+			// With no saved hero the way into a game stops at the new hero's name, which
+			// Return alone does not get past. Typed text goes nowhere in the other menus.
+			if (!returnDown) {
+				SDL_Event text;
+				SDL_zero(text);
+				text.type = SDL_TEXTINPUT;
+				text.text.windowID = SDL_GetWindowID(ghMainWnd);
+				SDL_strlcpy(text.text.text, "V", sizeof(text.text.text));
+				SDL_PushEvent(&text);
+			}
 			SetKey(returnDown, !returnDown, SDLK_RETURN);
 			nextTap = SDL_GetTicks() + 600;
 		}
@@ -307,14 +367,65 @@ void VrPresent(SDL_Surface *surface)
 	}
 
 	PollEvents();
+	UpdateFocusPause();
 	if (!sessionRunning)
 		return;
 
 	XrFrameState frameState { XR_TYPE_FRAME_STATE };
 	const auto lost = [](XrResult result) { return result == XR_ERROR_SESSION_LOST || result == XR_ERROR_INSTANCE_LOST; };
+	// Pacing, for the log: how long the game took to come back for the next frame, how long the
+	// runtime then made it wait, and how many display refreshes went by without a new frame.
+	static Uint64 frameEnded;
+	static Uint64 pacingSince = SDL_GetPerformanceCounter();
+	static XrTime lastDisplayTime;
+	static int pacedFrames;
+	static int missedFrames;
+	static double awayTotal;
+	static double awayLongest;
+	static double waitTotal;
+	const double perMs = 1000.0 / static_cast<double>(SDL_GetPerformanceFrequency());
+	const Uint64 waitStart = SDL_GetPerformanceCounter();
 	XrResult frameResult = xrWaitFrame(session, nullptr, &frameState);
+	if (XR_SUCCEEDED(frameResult)) {
+		const Uint64 waitEnd = SDL_GetPerformanceCounter();
+		static double lastAway;
+		static double lastWork;
+		static Uint64 lastWaitEnd;
+		double away = 0;
+		if (frameEnded != 0) {
+			away = static_cast<double>(waitStart - frameEnded) * perMs;
+			awayTotal += away;
+			awayLongest = std::max(awayLongest, away);
+		}
+		const double held = static_cast<double>(waitEnd - waitStart) * perMs;
+		waitTotal += held;
+		if (lastDisplayTime != 0 && frameState.predictedDisplayPeriod > 0) {
+			const auto steps = static_cast<int>(std::llround(static_cast<double>(frameState.predictedDisplayTime - lastDisplayTime) / static_cast<double>(frameState.predictedDisplayPeriod)));
+			if (steps > 1 && steps < 100) {
+				missedFrames += steps - 1;
+				// DEVILUTIONX_VR_DEBUG_PACING=1: what the frames around a miss looked like.
+				static const bool debugPacing = Knob("DEVILUTIONX_VR_DEBUG_PACING", 0) != 0;
+				static int reported;
+				if (debugPacing && reported++ < 40)
+					LogVerbose("VR: missed {}: frame before worked {:.2f} ms after waking, away {:.2f} ms before that; this one away {:.2f} ms, held {:.2f} ms", steps - 1, lastWork, lastAway, away, held);
+			}
+		}
+		lastAway = away;
+		lastWork = frameEnded != 0 && lastWaitEnd != 0 ? static_cast<double>(frameEnded - lastWaitEnd) * perMs : 0;
+		lastWaitEnd = waitEnd;
+		lastDisplayTime = frameState.predictedDisplayTime;
+		pacedFrames++;
+		const double seconds = static_cast<double>(waitEnd - pacingSince) * perMs / 1000.0;
+		if (seconds >= 10) {
+			LogVerbose("VR: pacing: {:.1f} fps on a {:.0f} Hz display, {} refreshes missed in {:.0f} s; the game is away {:.2f} ms a frame ({:.1f} at most), the runtime holds it {:.2f} ms",
+			    pacedFrames / seconds, 1e9 / static_cast<double>(frameState.predictedDisplayPeriod), missedFrames, seconds, awayTotal / pacedFrames, awayLongest, waitTotal / pacedFrames);
+			pacingSince = waitEnd;
+			pacedFrames = missedFrames = 0;
+			awayTotal = awayLongest = waitTotal = 0;
+		}
+	}
 	if (XR_SUCCEEDED(frameResult))
-		frameResult = xrBeginFrame(session, nullptr);
+		frameResult = xrd3d::BeginFrame(session);
 	if (XR_FAILED(frameResult)) {
 		if (lost(frameResult))
 			SessionLost("frame call failed");
@@ -331,8 +442,15 @@ void VrPresent(SDL_Surface *surface)
 
 	// In a game the world is drawn in 3D and the 2D frame shrinks to a panel; menus and videos get the big screen.
 	const bool showWorld = VrWorldAvailable();
+	// Debug aid: with the autostart, DEVILUTIONX_VR_DEBUG_LEVEL=<n> goes on to dungeon level n
+	// a few seconds into the game, as it does for the offscreen renderer.
+	static const int debugLevel = static_cast<int>(Knob("DEVILUTIONX_VR_DEBUG_LEVEL", 0));
+	static int worldFrames;
+	if (autostart && debugLevel != 0 && showWorld && ++worldFrames == 200)
+		EnterLevel(debugLevel);
 	if (showWorld != world3d) {
 		world3d = showWorld;
+		LogVerbose("VR: showing {}", world3d ? "the world" : "the screen");
 		mirrorReady = false;
 		screenPlaced = false;
 		anchorPending = true;
@@ -360,7 +478,9 @@ void VrPresent(SDL_Surface *surface)
 	XrCompositionLayerQuad extra { XR_TYPE_COMPOSITION_LAYER_QUAD };
 	const XrCompositionLayerBaseHeader *layers[3];
 	uint32_t layerCount = 0;
-	if (frameState.shouldRender && screenPlaced && surface != nullptr && UploadFrame(surface)) {
+	// Debug aid: a headset nobody wears is told not to render. See RenderWorld.
+	static const bool forceRender = Knob("DEVILUTIONX_VR_FORCE_RENDER", 0) != 0;
+	if ((frameState.shouldRender || forceRender) && screenPlaced && surface != nullptr && UploadFrame(surface)) {
 		quad.space = localSpace;
 		quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
 		quad.subImage.swapchain = swapchain;
@@ -419,7 +539,8 @@ void VrPresent(SDL_Surface *surface)
 	endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
 	endInfo.layerCount = layerCount;
 	endInfo.layers = layers;
-	const XrResult result = xrEndFrame(session, &endInfo);
+	const XrResult result = xrd3d::EndFrame(session, endInfo);
+	frameEnded = SDL_GetPerformanceCounter();
 	static XrResult lastResult = XR_SUCCESS;
 	if (result != lastResult) {
 		LogInfo("VR: xrEndFrame -> {} ({} layer(s), {}x{})", static_cast<int>(result), layerCount, swapchainWidth, swapchainHeight);

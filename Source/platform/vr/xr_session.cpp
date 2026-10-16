@@ -45,6 +45,8 @@ namespace vr {
 
 State state = State::Uninitialized;
 bool sessionRunning;
+bool sessionFocused;
+bool sessionWasFocused;
 /** Result of the background Init(): -1 while running, then 0 (failed) or 1 (ready). */
 std::atomic<int> initResult { -1 };
 /** Which installed OpenXR runtime to try next; advanced whenever one has no headset. */
@@ -59,7 +61,7 @@ ID3D11Device *device;
 ID3D11DeviceContext *context;
 
 XrSwapchain swapchain;
-std::vector<XrSwapchainImageD3D11KHR> swapchainImages;
+std::vector<ID3D11Texture2D *> swapchainImages;
 int swapchainWidth;
 int swapchainHeight;
 int64_t swapchainFormat;
@@ -73,6 +75,7 @@ Uint32 sessionStartTick;
 bool hasDepthLayer;
 bool hasVisibilityMask;
 bool hasRefreshRate;
+bool hasFrameControllers;
 int64_t depthFormat;
 /** Height of the tracking origin above the real floor; 0 when the runtime gives us a floor-level space. */
 float floorOffset;
@@ -163,15 +166,19 @@ std::vector<const char *> NegotiateExtensions()
 	xrEnumerateInstanceExtensionProperties(nullptr, 0, &count, nullptr);
 	std::vector<XrExtensionProperties> offered(count, XrExtensionProperties { XR_TYPE_EXTENSION_PROPERTIES });
 	xrEnumerateInstanceExtensionProperties(nullptr, count, &count, offered.data());
-	std::vector<const char *> enabled { XR_KHR_D3D11_ENABLE_EXTENSION_NAME };
+	std::vector<const char *> enabled { xrd3d::BindingExtension() };
 	const auto negotiate = [&](const char *name, bool &has) {
 		has = optional && std::any_of(offered.begin(), offered.end(), [&](const XrExtensionProperties &extension) { return std::strcmp(extension.extensionName, name) == 0; });
 		if (has)
 			enabled.push_back(name);
 	};
 	negotiate(XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME, hasDepthLayer);
+	// DEVILUTIONX_VR_DEPTH_LAYER=0: no depth is handed to the compositor, which saves two
+	// swapchains and a depth write per eye where the compositor does nothing with it.
+	hasDepthLayer = hasDepthLayer && Knob("DEVILUTIONX_VR_DEPTH_LAYER", 1) != 0;
 	negotiate(XR_KHR_VISIBILITY_MASK_EXTENSION_NAME, hasVisibilityMask);
 	negotiate(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME, hasRefreshRate);
+	negotiate("XR_VALVE_frame_controller_interaction", hasFrameControllers);
 	return enabled;
 }
 
@@ -259,18 +266,14 @@ bool CreateDepthSwapchain(EyeTarget &eye)
 	info.faceCount = 1;
 	info.arraySize = 1;
 	info.mipCount = 1;
-	if (!Check(xrCreateSwapchain(session, &info, &eye.depthSwapchain), "xrCreateSwapchain(depth)"))
+	if (!Check(xrd3d::CreateSwapchain(session, info, &eye.depthSwapchain), "xrCreateSwapchain(depth)"))
 		return false;
-	uint32_t imageCount = 0;
-	xrEnumerateSwapchainImages(eye.depthSwapchain, 0, &imageCount, nullptr);
-	std::vector<XrSwapchainImageD3D11KHR> images(imageCount, XrSwapchainImageD3D11KHR { XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR });
-	xrEnumerateSwapchainImages(eye.depthSwapchain, imageCount, &imageCount, reinterpret_cast<XrSwapchainImageBaseHeader *>(images.data()));
-	for (const XrSwapchainImageD3D11KHR &image : images) {
+	for (ID3D11Texture2D *image : xrd3d::SwapchainImages(eye.depthSwapchain)) {
 		D3D11_DEPTH_STENCIL_VIEW_DESC viewDesc {};
 		viewDesc.Format = static_cast<DXGI_FORMAT>(depthFormat);
 		viewDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
 		ID3D11DepthStencilView *view = nullptr;
-		if (FAILED(device->CreateDepthStencilView(image.texture, &viewDesc, &view)))
+		if (FAILED(device->CreateDepthStencilView(image, &viewDesc, &view)))
 			return false;
 		eye.depthViews.push_back(view);
 	}
@@ -287,7 +290,17 @@ bool CreateEyeTargets()
 		EyeTarget &eye = eyes[i];
 		eye.width = static_cast<int>(configViews[i].recommendedImageRectWidth);
 		eye.height = static_cast<int>(configViews[i].recommendedImageRectHeight);
-		LogInfo("VR: eye {} target {}x{}", i, eye.width, eye.height);
+		// DEVILUTIONX_VR_EYE_SIZE=<pixels>: the width of the eye images, whatever the runtime
+		// recommends. A standalone headset recommends fewer pixels than its panels have, and
+		// what it recommends moves with its per-application settings, so this is a size and
+		// not a factor.
+		static const float eyeSize = Knob("DEVILUTIONX_VR_EYE_SIZE", 0);
+		if (eyeSize > 0) {
+			const float scale = eyeSize / static_cast<float>(eye.width);
+			eye.width = std::min(static_cast<int>(eyeSize), static_cast<int>(configViews[i].maxImageRectWidth));
+			eye.height = std::min(static_cast<int>(std::lround(static_cast<float>(eye.height) * scale)), static_cast<int>(configViews[i].maxImageRectHeight));
+		}
+		LogInfo("VR: eye {} target {}x{} (recommended {}x{})", i, eye.width, eye.height, configViews[i].recommendedImageRectWidth, configViews[i].recommendedImageRectHeight);
 		XrSwapchainCreateInfo info { XR_TYPE_SWAPCHAIN_CREATE_INFO };
 		info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
 		info.format = swapchainFormat;
@@ -297,20 +310,17 @@ bool CreateEyeTargets()
 		info.faceCount = 1;
 		info.arraySize = 1;
 		info.mipCount = 1;
-		if (!Check(xrCreateSwapchain(session, &info, &eye.swapchain), "xrCreateSwapchain(eye)"))
+		if (!Check(xrd3d::CreateSwapchain(session, info, &eye.swapchain), "xrCreateSwapchain(eye)"))
 			return false;
-		uint32_t imageCount = 0;
-		xrEnumerateSwapchainImages(eye.swapchain, 0, &imageCount, nullptr);
-		eye.images.assign(imageCount, XrSwapchainImageD3D11KHR { XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR });
-		xrEnumerateSwapchainImages(eye.swapchain, imageCount, &imageCount, reinterpret_cast<XrSwapchainImageBaseHeader *>(eye.images.data()));
+		eye.images = xrd3d::SwapchainImages(eye.swapchain);
 		eye.views.clear();
-		for (const XrSwapchainImageD3D11KHR &image : eye.images) {
+		for (ID3D11Texture2D *image : eye.images) {
 			// Runtimes may hand out typeless textures, so name the format explicitly.
 			D3D11_RENDER_TARGET_VIEW_DESC viewDesc {};
 			viewDesc.Format = static_cast<DXGI_FORMAT>(swapchainFormat);
 			viewDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
 			ID3D11RenderTargetView *view = nullptr;
-			if (FAILED(device->CreateRenderTargetView(image.texture, &viewDesc, &view))) {
+			if (FAILED(device->CreateRenderTargetView(image, &viewDesc, &view))) {
 				LogError("VR: CreateRenderTargetView failed");
 				return false;
 			}
@@ -351,42 +361,12 @@ bool Init()
 	if (!Check(xrGetSystem(instance, &systemInfo, &systemId), "xrGetSystem (is the headset connected?)"))
 		return false;
 
-	XrGraphicsRequirementsD3D11KHR requirements { XR_TYPE_GRAPHICS_REQUIREMENTS_D3D11_KHR };
-	// Extension functions are not exported by the loader.
-	PFN_xrGetD3D11GraphicsRequirementsKHR getRequirements = nullptr;
-	if (!Check(xrGetInstanceProcAddr(instance, "xrGetD3D11GraphicsRequirementsKHR", reinterpret_cast<PFN_xrVoidFunction *>(&getRequirements)), "xrGetInstanceProcAddr")
-	    || !Check(getRequirements(instance, systemId, &requirements), "xrGetD3D11GraphicsRequirementsKHR"))
-		return false;
-
-	// The device must live on the adapter the headset is attached to.
-	IDXGIFactory1 *factory = nullptr;
-	IDXGIAdapter1 *adapter = nullptr;
-	if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void **>(&factory)))) {
-		for (UINT i = 0; factory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; i++) {
-			DXGI_ADAPTER_DESC1 adapterDesc;
-			adapter->GetDesc1(&adapterDesc);
-			if (std::memcmp(&adapterDesc.AdapterLuid, &requirements.adapterLuid, sizeof(LUID)) == 0)
-				break;
-			adapter->Release();
-			adapter = nullptr;
-		}
-		factory->Release();
-	}
-	const HRESULT hr = D3D11CreateDevice(adapter, adapter != nullptr ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE,
-	    nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context);
-	if (adapter != nullptr)
-		adapter->Release();
-	if (FAILED(hr)) {
-		LogError("VR: D3D11CreateDevice failed ({:#x})", static_cast<unsigned>(hr));
+	xrd3d::log = [](const char *message) { LogInfo("VR: {}", message); };
+	if (!xrd3d::CreateDevice(instance, systemId, &device, &context)) {
+		LogError("VR: no Direct3D 11 device on the headset's graphics adapter");
 		return false;
 	}
-
-	XrGraphicsBindingD3D11KHR binding { XR_TYPE_GRAPHICS_BINDING_D3D11_KHR };
-	binding.device = device;
-	XrSessionCreateInfo sessionInfo { XR_TYPE_SESSION_CREATE_INFO };
-	sessionInfo.next = &binding;
-	sessionInfo.systemId = systemId;
-	if (!Check(xrCreateSession(instance, &sessionInfo, &session), "xrCreateSession"))
+	if (!Check(xrd3d::CreateSession(instance, systemId, device, &session), "xrCreateSession"))
 		return false;
 
 	XrReferenceSpaceCreateInfo spaceInfo { XR_TYPE_REFERENCE_SPACE_CREATE_INFO };
@@ -405,10 +385,7 @@ bool Init()
 		return false;
 
 	// Game pixels are gamma encoded, so only sRGB formats give correct brightness.
-	uint32_t formatCount = 0;
-	xrEnumerateSwapchainFormats(session, 0, &formatCount, nullptr);
-	std::vector<int64_t> formats(formatCount);
-	xrEnumerateSwapchainFormats(session, formatCount, &formatCount, formats.data());
+	const std::vector<int64_t> formats = xrd3d::SwapchainFormats(session);
 	for (const int64_t format : formats) {
 		if (format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB) {
 			swapchainFormat = format;
@@ -451,6 +428,7 @@ bool Init()
  */
 void SelectRuntime()
 {
+#ifdef _WIN32
 	// An inherited XR_RUNTIME_JSON is the user's explicit choice, unless we run elevated: then
 	// it may come from a less privileged parent and is not trusted (see Source/CMakeLists.txt).
 	static const bool elevated = [] {
@@ -485,12 +463,16 @@ void SelectRuntime()
 	SetEnvironmentVariableA("XR_RUNTIME_JSON", choice == 0 ? nullptr : runtimes[choice - 1].c_str());
 	if (runtimeIndex < 2 * (runtimes.size() + 1))
 		LogInfo("VR: trying OpenXR runtime: {}", choice == 0 ? "system default" : runtimes[choice - 1].c_str());
+#endif
 }
 
 void SessionLost(const char *reason)
 {
 	LogInfo("VR: session lost ({}), reconnecting", reason);
 	sessionRunning = false;
+	sessionFocused = false;
+	sessionWasFocused = false;
+	UpdateFocusPause(); // The game goes on in the desktop window.
 	state = State::Uninitialized; // VrPresent tears down and reconnects.
 }
 
@@ -500,6 +482,10 @@ void PollEvents()
 	while (xrPollEvent(instance, &event) == XR_SUCCESS) {
 		if (event.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
 			const XrSessionState newState = reinterpret_cast<XrEventDataSessionStateChanged *>(&event)->state;
+			// Focused: worn, and nothing of the system's (its menu, another overlay) in front.
+			sessionFocused = newState == XR_SESSION_STATE_FOCUSED;
+			sessionWasFocused = sessionWasFocused || sessionFocused;
+			LogVerbose("VR: session state {}{}", static_cast<int>(newState), sessionFocused ? " (focused)" : "");
 			if (newState == XR_SESSION_STATE_READY) {
 				XrSessionBeginInfo beginInfo { XR_TYPE_SESSION_BEGIN_INFO };
 				beginInfo.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
@@ -526,6 +512,8 @@ void PollEvents()
 			return;
 		} else if (event.type == XR_TYPE_EVENT_DATA_VISIBILITY_MASK_CHANGED_KHR) {
 			UpdateVisibilityMask(reinterpret_cast<XrEventDataVisibilityMaskChangedKHR *>(&event)->viewIndex);
+		} else if (event.type == XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED) {
+			ControllersChanged();
 		} else if (event.type == XR_TYPE_EVENT_DATA_DISPLAY_REFRESH_RATE_CHANGED_FB) {
 			LogInfo("VR: refresh rate now {:.0f} Hz", reinterpret_cast<XrEventDataDisplayRefreshRateChangedFB *>(&event)->toDisplayRefreshRate);
 		}
@@ -538,7 +526,7 @@ bool EnsureSwapchain(int width, int height)
 	if (swapchain != XR_NULL_HANDLE && width == swapchainWidth && height == swapchainHeight)
 		return true;
 	if (swapchain != XR_NULL_HANDLE) {
-		xrDestroySwapchain(swapchain);
+		xrd3d::DestroySwapchain(swapchain);
 		swapchain = XR_NULL_HANDLE;
 	}
 
@@ -551,14 +539,9 @@ bool EnsureSwapchain(int width, int height)
 	info.faceCount = 1;
 	info.arraySize = 1;
 	info.mipCount = 1;
-	if (!Check(xrCreateSwapchain(session, &info, &swapchain), "xrCreateSwapchain"))
+	if (!Check(xrd3d::CreateSwapchain(session, info, &swapchain), "xrCreateSwapchain"))
 		return false;
-
-	uint32_t imageCount = 0;
-	xrEnumerateSwapchainImages(swapchain, 0, &imageCount, nullptr);
-	swapchainImages.assign(imageCount, XrSwapchainImageD3D11KHR { XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR });
-	xrEnumerateSwapchainImages(swapchain, imageCount, &imageCount,
-	    reinterpret_cast<XrSwapchainImageBaseHeader *>(swapchainImages.data()));
+	swapchainImages = xrd3d::SwapchainImages(swapchain);
 	swapchainWidth = width;
 	swapchainHeight = height;
 	pixelBuffer.resize(static_cast<size_t>(width) * height * 4);
@@ -584,28 +567,18 @@ bool UploadFrame(SDL_Surface *surface)
 	}
 
 	uint32_t imageIndex = 0;
-	XrSwapchainImageAcquireInfo acquireInfo { XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
-	if (XR_FAILED(xrAcquireSwapchainImage(swapchain, &acquireInfo, &imageIndex)))
+	if (XR_FAILED(xrd3d::AcquireSwapchainImage(swapchain, &imageIndex)))
 		return false;
-	XrSwapchainImageWaitInfo waitInfo { XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO };
-	waitInfo.timeout = XR_INFINITE_DURATION;
-	const bool ok = XR_SUCCEEDED(xrWaitSwapchainImage(swapchain, &waitInfo));
+	const bool ok = XR_SUCCEEDED(xrd3d::WaitSwapchainImage(swapchain));
 	if (ok)
-		context->UpdateSubresource(swapchainImages[imageIndex].texture, 0, nullptr, pixelBuffer.data(), surface->w * 4, 0);
-	XrSwapchainImageReleaseInfo releaseInfo { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
-	xrReleaseSwapchainImage(swapchain, &releaseInfo);
+		context->UpdateSubresource(swapchainImages[imageIndex], 0, nullptr, pixelBuffer.data(), surface->w * 4, 0);
+	xrd3d::ReleaseSwapchainImage(swapchain);
 	return ok;
 }
 
 void Cleanup()
 {
-	if (instance != XR_NULL_HANDLE)
-		xrDestroyInstance(instance); // Destroys the session, spaces, swapchain and actions with it.
-	instance = XR_NULL_HANDLE;
-	session = XR_NULL_HANDLE;
-	swapchain = XR_NULL_HANDLE;
-	sessionRunning = false;
-	screenPlaced = false;
+	// What was made from the session's images goes first, then the session, then the device under it.
 	VrWorldRelease();
 	for (EyeTarget &eye : eyes) {
 		for (ID3D11RenderTargetView *view : eye.views)
@@ -616,8 +589,18 @@ void Cleanup()
 			eye.maskVertices->Release();
 		eye = {};
 	}
+	swapchainImages.clear();
 	ReleaseMirror();
 	ProfileRelease();
+	if (session != XR_NULL_HANDLE)
+		xrd3d::DestroySession(session); // Destroys the spaces and swapchains with it.
+	if (instance != XR_NULL_HANDLE)
+		xrDestroyInstance(instance); // And the actions.
+	instance = XR_NULL_HANDLE;
+	session = XR_NULL_HANDLE;
+	swapchain = XR_NULL_HANDLE;
+	sessionRunning = false;
+	screenPlaced = false;
 	if (context != nullptr)
 		context->Release();
 	if (device != nullptr)

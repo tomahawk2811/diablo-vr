@@ -1,0 +1,144 @@
+diff --git a/src/dxvk/dxvk_instance.cpp b/src/dxvk/dxvk_instance.cpp
+index a120a21..e0427c8 100644
+--- a/src/dxvk/dxvk_instance.cpp
++++ b/src/dxvk/dxvk_instance.cpp
+@@ -4,6 +4,7 @@
+ #include "dxvk_instance.h"
+ #include "dxvk_openvr.h"
+ #include "dxvk_openxr.h"
++#include "dxvk_openxr_native.h"
+ #include "dxvk_platform_exts.h"
+ 
+ #include "../wsi/wsi_platform.h"
+@@ -44,6 +45,8 @@ namespace dxvk {
+ #ifdef _WIN32
+     m_extProviders.push_back(&VrInstance::s_instance);
+     m_extProviders.push_back(&DxvkXrProvider::s_instance);
++#else
++    m_extProviders.push_back(&DxvkXrNativeProvider::s_instance);
+ #endif
+ 
+     Logger::info("Extension providers:");
+diff --git a/src/dxvk/dxvk_openxr_native.cpp b/src/dxvk/dxvk_openxr_native.cpp
+new file mode 100644
+index 0000000..b0d799b
+--- /dev/null
++++ b/src/dxvk/dxvk_openxr_native.cpp
+@@ -0,0 +1,52 @@
++#include <sstream>
++
++#include "dxvk_openxr_native.h"
++
++#include "../util/util_env.h"
++
++namespace dxvk {
++
++  DxvkXrNativeProvider DxvkXrNativeProvider::s_instance;
++
++  std::string_view DxvkXrNativeProvider::getName() {
++    return "OpenXR (native)";
++  }
++
++
++  DxvkExtensionList DxvkXrNativeProvider::getInstanceExtensions() {
++    return m_insExtensions;
++  }
++
++
++  DxvkExtensionList DxvkXrNativeProvider::getDeviceExtensions(
++          uint32_t      adapterId) {
++    return m_devExtensions;
++  }
++
++
++  void DxvkXrNativeProvider::initInstanceExtensions() {
++    m_insExtensions = parseExtensionList(env::getEnvVar("DXVK_OPENXR_INSTANCE_EXTENSIONS"));
++  }
++
++
++  void DxvkXrNativeProvider::initDeviceExtensions(
++    const DxvkInstance* instance) {
++    m_devExtensions = parseExtensionList(env::getEnvVar("DXVK_OPENXR_DEVICE_EXTENSIONS"));
++  }
++
++
++  DxvkExtensionList DxvkXrNativeProvider::parseExtensionList(const std::string& str) {
++    DxvkExtensionList result;
++
++    std::stringstream strstream(str);
++    std::string       section;
++
++    while (std::getline(strstream, section, ' ')) {
++      if (!section.empty())
++        result.push_back(vk::makeExtension(section.c_str()));
++    }
++
++    return result;
++  }
++
++}
+diff --git a/src/dxvk/dxvk_openxr_native.h b/src/dxvk/dxvk_openxr_native.h
+new file mode 100644
+index 0000000..5c054c1
+--- /dev/null
++++ b/src/dxvk/dxvk_openxr_native.h
+@@ -0,0 +1,44 @@
++#pragma once
++
++#include "dxvk_extension_provider.h"
++
++namespace dxvk {
++
++  /**
++   * \brief OpenXR extension provider for native builds
++   *
++   * A native application talks to the OpenXR runtime itself, so it
++   * already knows which Vulkan extensions the runtime needs. It passes
++   * them on in \c DXVK_OPENXR_INSTANCE_EXTENSIONS and
++   * \c DXVK_OPENXR_DEVICE_EXTENSIONS, as the space-separated lists that
++   * \c xrGetVulkanInstanceExtensionsKHR and
++   * \c xrGetVulkanDeviceExtensionsKHR return.
++   */
++  class DxvkXrNativeProvider : public DxvkExtensionProvider {
++
++  public:
++
++    std::string_view getName();
++
++    DxvkExtensionList getInstanceExtensions();
++
++    DxvkExtensionList getDeviceExtensions(
++            uint32_t      adapterId);
++
++    void initInstanceExtensions();
++
++    void initDeviceExtensions(
++      const DxvkInstance* instance);
++
++    static DxvkXrNativeProvider s_instance;
++
++  private:
++
++    DxvkExtensionList m_insExtensions;
++    DxvkExtensionList m_devExtensions;
++
++    static DxvkExtensionList parseExtensionList(const std::string& str);
++
++  };
++
++}
+diff --git a/src/dxvk/meson.build b/src/dxvk/meson.build
+index 6b12f95..8041c13 100644
+--- a/src/dxvk/meson.build
++++ b/src/dxvk/meson.build
+@@ -95,6 +95,10 @@ if platform == 'windows'
+     'dxvk_openvr.cpp',
+     'dxvk_openxr.cpp',
+   ]
++else
++  dxvk_src += [
++    'dxvk_openxr_native.cpp',
++  ]
+ endif
+ 
+ dxvk_extra_deps = [ dependency('threads') ]

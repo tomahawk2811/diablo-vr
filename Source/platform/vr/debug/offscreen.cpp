@@ -55,6 +55,8 @@ bool EnsureOffscreen(int width, int height)
 	return VrWorldAvailable() && colorView[1] != nullptr;
 }
 
+} // namespace
+
 /** Goes to a dungeon level whose layout is the same in every run, so two builds can be compared. */
 void EnterLevel(int level)
 {
@@ -65,6 +67,8 @@ void EnterLevel(int level)
 	InitQuests(); // Which quests are in the game, and so their set pieces, comes from the seeds.
 	StartNewLvl(*MyPlayer, WM_DIABNEXTLVL, level);
 }
+
+namespace {
 
 VrView MakeView(const float position[3], const float orientation[4], const XrFovf &fov, float sideways = 0)
 {
@@ -218,8 +222,8 @@ void WriteBench(const char *directory, int level, int width, int height, float s
 	    worst.drawCalls, worst.triangles, worst.meshInstances, worst.sprites, worst.particles, worst.lights,
 	    megabytes(render::MemoryKind::Targets), megabytes(render::MemoryKind::Textures), megabytes(render::MemoryKind::Geometry), megabytes(render::MemoryKind::Dynamic),
 	    static_cast<double>(ProfileVramBytes()) / (1024.0 * 1024.0));
-	char path[MAX_PATH];
-	SDL_snprintf(path, sizeof(path), "%s%sbench.json", directory, *directory != 0 ? "\\" : "");
+	char path[1024];
+	SDL_snprintf(path, sizeof(path), "%s%sbench.json", directory, *directory != 0 ? "/" : "");
 	if (SDL_RWops *file = SDL_RWFromFile(path, "wb"); file != nullptr) {
 		SDL_RWwrite(file, text, 1, SDL_strlen(text));
 		SDL_RWclose(file);
@@ -288,8 +292,8 @@ void DebugOffscreen(const char *directory)
 	// The first two turns are skipped: a level change asked for at frame 30 takes a few frames to happen.
 	static int captured;
 	if (captured < 8 && frame >= 80 && frame % 40 == 39) {
-		char path[MAX_PATH];
-		SDL_snprintf(path, sizeof(path), "%s\\eye%d.bmp", directory, shot);
+		char path[1024];
+		SDL_snprintf(path, sizeof(path), "%s/eye%d.bmp", directory, shot);
 		DumpTexture(color[0], path);
 		if (++captured == 8) {
 			// Both eyes in one pass, the way the headset is fed.
@@ -297,12 +301,12 @@ void DebugOffscreen(const char *directory)
 			const VrViewTarget targets[2] = { { colorView[0], nullptr, nullptr, 0 }, { colorView[1], nullptr, nullptr, 0 } };
 			VrWorldRender(views, 2, Width, Height, targets);
 			for (int eye = 0; eye < 2; eye++) {
-				SDL_snprintf(path, sizeof(path), "%s\\stereo%d.bmp", directory, eye);
+				SDL_snprintf(path, sizeof(path), "%s/stereo%d.bmp", directory, eye);
 				DumpTexture(color[eye], path);
 			}
-			SDL_snprintf(path, sizeof(path), "%s\\atlas.bmp", directory);
+			SDL_snprintf(path, sizeof(path), "%s/atlas.bmp", directory);
 			VrWorldDumpAtlas(path);
-			SDL_snprintf(path, sizeof(path), "%s\\done", directory);
+			SDL_snprintf(path, sizeof(path), "%s/done", directory);
 			if (SDL_RWops *marker = SDL_RWFromFile(path, "wb"); marker != nullptr)
 				SDL_RWclose(marker);
 		}

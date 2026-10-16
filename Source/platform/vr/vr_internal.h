@@ -12,18 +12,20 @@
 #include <cstdint>
 #include <vector>
 
+#ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
+#endif
 #include <d3d11.h>
 #include <dxgi.h>
+#ifdef _WIN32
 #include <windows.h>
 
 #define XR_USE_PLATFORM_WIN32
-#define XR_USE_GRAPHICS_API_D3D11
-#include <openxr/openxr.h>
-#include <openxr/openxr_platform.h>
+#endif
 
 #include "platform/vr/knob.h"
+#include "platform/vr/xr_d3d11.h"
 
 namespace devilution {
 namespace vr {
@@ -55,7 +57,7 @@ enum class State : uint8_t {
 
 struct EyeTarget {
 	XrSwapchain swapchain;
-	std::vector<XrSwapchainImageD3D11KHR> images;
+	std::vector<ID3D11Texture2D *> images;
 	std::vector<ID3D11RenderTargetView *> views;
 	int width;
 	int height;
@@ -70,6 +72,10 @@ struct EyeTarget {
 // xr_session.cpp
 extern State state;
 extern bool sessionRunning;
+/** The session has the wearer's attention: the headset is on and the system shows nothing over the game. */
+extern bool sessionFocused;
+/** It has had it at least once since it began. */
+extern bool sessionWasFocused;
 extern std::atomic<int> initResult;
 extern size_t runtimeIndex;
 extern XrInstance instance;
@@ -80,13 +86,15 @@ extern XrSpace viewSpace;
 extern ID3D11Device *device;
 extern ID3D11DeviceContext *context;
 extern XrSwapchain swapchain;
-extern std::vector<XrSwapchainImageD3D11KHR> swapchainImages;
+extern std::vector<ID3D11Texture2D *> swapchainImages;
 extern int swapchainWidth;
 extern int swapchainHeight;
 extern int64_t swapchainFormat;
 extern Uint32 swapchainSdlFormat;
 extern EyeTarget eyes[2];
 extern float floorOffset;
+/** The runtime knows the Steam Frame's controllers (XR_VALVE_frame_controller_interaction). */
+extern bool hasFrameControllers;
 /** SDL tick at which the running session began. */
 extern Uint32 sessionStartTick;
 
@@ -104,6 +112,10 @@ void PollEvents();
 void SessionLost(const char *reason);
 bool UploadFrame(SDL_Surface *surface);
 void Cleanup();
+
+// vr.cpp
+/** Pauses the game while the session is out of focus, and lets it go on when focus is back. */
+void UpdateFocusPause();
 
 // vr.cpp: where the 2D frame and the world sit relative to the tracking space.
 extern XrPosef screenPose;
@@ -132,6 +144,10 @@ extern float worldPointerHit[3];
 extern bool freeValid;
 
 bool InitActions();
+/** The runtime bound another kind of controller: note which. */
+void ControllersChanged();
+/** Anything that needs the 2D frame in view: panels, dialogs, shops, menus, the automap. */
+bool UiOpen();
 bool InitVirtualPad();
 void SelfCheck();
 void SetKey(bool &isDown, bool down, SDL_Keycode key);
@@ -158,6 +174,7 @@ void RenderMirror();
 void ReleaseMirror();
 
 // debug/offscreen.cpp
+void EnterLevel(int level);
 void DebugOffscreen(const char *directory);
 void DebugBench(int level, const char *directory);
 

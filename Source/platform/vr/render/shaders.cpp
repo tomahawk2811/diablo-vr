@@ -99,8 +99,13 @@ Buffer<float4> bones : register(t7);
 StructuredBuffer<MeshInstance> meshInstances : register(t8);
 StructuredBuffer<SpriteInstance> spriteInstances : register(t9);
 StructuredBuffer<ParticleInstance> particleInstances : register(t10);
+#if SINGLE_SAMPLE
+// Without MSAA the scene is drawn straight into the post-processing source, and its depth is a plain texture.
+Texture2DArray<float> msDepth : register(t12);
+#else
 Texture2DMSArray<float4> msColor : register(t11);
 Texture2DMSArray<float> msDepth : register(t12);
+#endif
 Texture2DArray postSource : register(t13);
 Texture2DArray postBloom : register(t14);
 Texture2DArray modelTextures : register(t15);
@@ -253,6 +258,18 @@ float4 VsMask(float2 position : POSITION) : SV_Position
 )hlsl"
     // MSVC caps one string literal at 16 KB; adjacent literals are joined.
     R"hlsl(
+// Samples along the line from a surface point to a light that look for a wall in between
+// (DEVILUTIONX_VR_WALL_SHADOW_STEPS). 0: walls cast no shadows. With WALL_SHADOW_SPACING
+// (DEVILUTIONX_VR_WALL_SHADOW_SPACING, in tiles) that is the most, and a pixel takes one
+// sample per that length of the way.
+#ifndef WALL_SHADOW_STEPS
+#define WALL_SHADOW_STEPS 16
+#endif
+// Filtered comparisons a pixel makes against the sun's shadow map: 9, 4 or 1 (DEVILUTIONX_VR_SUN_SHADOW_TAPS).
+#ifndef SUN_SHADOW_TAPS
+#define SUN_SHADOW_TAPS 9
+#endif
+
 float Noise(float2 pixel)
 {
 	return frac(52.9829189 * frac(dot(pixel, float2(0.06711056, 0.00583715))));
@@ -265,9 +282,14 @@ float WallShadow(float3 from, float3 to, float jitter)
 	float2 a = from.xz * level.z;
 	float2 b = to.xz * level.z;
 	float visibility = 1;
-	const int Steps = 16;
-	for (int i = 0; i < Steps; i++) {
-		float t = (i + jitter) / Steps;
+#ifdef WALL_SHADOW_SPACING
+	// A light close by needs fewer samples to look at the same share of every tile on the way.
+	int steps = clamp((int)ceil(length(b - a) * level.y / WALL_SHADOW_SPACING), 1, max(WALL_SHADOW_STEPS, 1));
+#else
+	const int steps = max(WALL_SHADOW_STEPS, 1);
+#endif
+	for (int i = 0; i < steps; i++) {
+		float t = (i + jitter) / steps;
 		float solid = occupancy.SampleLevel(linearClamp, float3(lerp(a, b, t), 0), 0).r;
 		visibility = min(visibility, 1 - smoothstep(0.45, 0.8, solid));
 	}
@@ -280,12 +302,23 @@ float SunShadow(float3 world)
 	float2 uv = clip.xy * float2(0.5, -0.5) + 0.5;
 	if (any(uv < 0) || any(uv > 1))
 		return 1;
+#if SUN_SHADOW_TAPS >= 9
 	float sum = 0;
 	for (int y = -1; y <= 1; y++) {
 		for (int x = -1; x <= 1; x++)
 			sum += shadowMap.SampleCmpLevelZero(shadowSampler, float3(uv + float2(x, y) * sunDirection.w, 0), clip.z);
 	}
 	return sum / 9;
+#elif SUN_SHADOW_TAPS >= 4
+	// Each comparison is filtered over two texels a side already: four of them half a texel
+	// out cover three texels across, where the nine cover four.
+	float sum = 0;
+	for (int i = 0; i < 4; i++)
+		sum += shadowMap.SampleCmpLevelZero(shadowSampler, float3(uv + (float2(i & 1, i >> 1) - 0.5) * sunDirection.w, 0), clip.z);
+	return sum / 4;
+#else
+	return shadowMap.SampleCmpLevelZero(shadowSampler, float3(uv, 0), clip.z);
+#endif
 }
 
 /**
@@ -327,7 +360,11 @@ float3 Lighting(float3 world, float3 normal, float3 toEye, float specular, float
 		float facing = lerp(saturate(dot(normal, toLight)), 1, wrap);
 		if (facing * falloff <= 0.0005)
 			continue;
+#if WALL_SHADOW_STEPS > 0
 		float visible = source.shadowed > 0.5 ? WallShadow(open, source.position, jitter) : 1;
+#else
+		float visible = 1;
+#endif
 		light += source.color * (facing * falloff * visible);
 		float3 halfway = normalize(toLight + toEye);
 		highlight += source.color * (pow(saturate(dot(normal, halfway)), 48) * specular * falloff * visible);
@@ -539,8 +576,13 @@ float4 PsSurface(SurfaceOut input) : SV_Target
 	normal *= dot(normal, eyePosition[EyeOf(input)].xyz - input.world) < 0 ? -1 : 1;
 	// A surface that wears a material carries it in the layer value (see MaterialLayerStep).
 	float layer = input.uvLayer.z;
+#if PLAIN_SURFACES
+	// The level has no materials, no floor map and no grit: none of that is looked up.
+	float material = -1;
+#else
 	float material = layer >= 8192 ? floor(layer / 8192) - 1 : -1;
 	layer -= (material + 1) * 8192;
+#endif
 	// Sampled unconditionally: texture lookups need derivatives, which a branch would not have.
 	bool textured = layer >= 0;
 	float3 uvLayer = float3(input.uvLayer.xy, max(layer, 0));
@@ -562,6 +604,10 @@ float4 PsSurface(SurfaceOut input) : SV_Target
 		texel = float4(modelTexel.rgb, 1);
 		bumped = normal;
 	}
+#if PLAIN_SURFACES
+	bool gritty = false;
+	float2 surfaceAt = 0;
+#else
 	// Materials are laid out by world position, so they run on across tiles: floors by x and z,
 	// walls by height and whichever of x and z they run along.
 	float3 facing = abs(normal);
@@ -623,12 +669,15 @@ float4 PsSurface(SurfaceOut input) : SV_Target
 	}
 	if (floorMapped && material < 0)
 		texel.rgb *= grime;
+#endif
 	// Lava and water: the picture keeps the palette index of the colours the game cycles, and they
 	// take the colour that index has this frame, so they flow as they do in the game.
 	uint cycling = (uint)(surfaceNormals.Load(int4(int2(saturate(crisp) * size * 0.9999), uvLayer.z, 0)).b * 255 + 0.5);
 	if (textured && !model && cycling != 0)
 		texel.rgb = paletteLit.Load(int4(cycling, 0, 0, 0)).rgb;
+#if !DEPTH_PREPASSED
 	clip(textured ? texel.a - 0.3 : 1);
+#endif
 	// Walls, floors and everything else built of the level's art wear the grit; what glows does not.
 	bool worn = gritty && textured && input.material.x <= 0 && (model || cycling == 0);
 	if (worn)
@@ -650,6 +699,25 @@ float4 PsSurface(SurfaceOut input) : SV_Target
 		color = albedo.rgb * (lit.light + input.material.x);
 	}
 	return Finish(input, color, albedo, shadingNormal, lit, eye);
+}
+
+// The depth pre-pass of levels without materials (DEVILUTIONX_VR_DEPTH_PREPASS): only what
+// decides whether the pixel is there at all, which is the art's cut-out. PsSurface then runs once
+// for each pixel that is seen, compiled with DEPTH_PREPASSED and drawn where the depth is equal.
+void PsSurfaceDepth(SurfaceOut input)
+{
+	float layer = input.uvLayer.z;
+	// Models (layers from 4096 up) and plain colours have no holes.
+	bool cutOut = layer >= 0 && layer < 4096;
+	float3 uvLayer = float3(input.uvLayer.xy, max(layer, 0));
+	if (uvLayer.y < 0)
+		uvLayer.y = lerp(0.6, 0.25, 1 - abs(frac(-uvLayer.y * 0.5) * 2 - 1));
+	float2 size = float2(64, 128);
+	float2 at = uvLayer.xy * size - 0.5;
+	float2 crisp = (floor(at) + 0.5 + saturate((frac(at) - 0.5) / max(fwidth(at), 1e-4) + 0.5)) / size;
+	float alpha = surfaces.SampleGrad(surfaceSampler, float3(crisp, uvLayer.z), ddx(uvLayer.xy), ddy(uvLayer.xy)).a;
+	// Half, where alpha to coverage puts the edge when there is one sample a pixel.
+	clip(cutOut ? alpha - 0.5 : 1);
 }
 
 float4 PsSprite(SurfaceOut input, out float depth : SV_Depth) : SV_Target
@@ -819,6 +887,9 @@ FullOut VsFullscreen(uint vertexId : SV_VertexID)
 // very bright sample (a flame against the dark) wins the pixel and the edge stays jagged.
 float4 PsResolve(FullOut input) : SV_Target
 {
+#if SINGLE_SAMPLE
+	return 0;
+#else
 	int3 pixel = int3(input.clip.xy, post.x);
 	float3 sum = 0;
 	float weights = 0;
@@ -829,6 +900,7 @@ float4 PsResolve(FullOut input) : SV_Target
 		weights += weight;
 	}
 	return float4(sum / weights, 1);
+#endif
 }
 
 float3 Box(float2 uv, float2 texel)
@@ -875,7 +947,11 @@ FinalOut PsFinal(FullOut input)
 	color = pow(color, 1 / 2.2) + (Noise(input.clip.xy) - 0.5) / 255;
 	FinalOut output;
 	output.color = float4(pow(max(color, 0), 2.2), 1);
+#if SINGLE_SAMPLE
+	output.depth = msDepth.Load(int4(input.uv * post.zw, post.x, 0));
+#else
 	output.depth = msDepth.Load(int3(input.uv * post.zw, post.x), 0);
+#endif
 	return output;
 }
 

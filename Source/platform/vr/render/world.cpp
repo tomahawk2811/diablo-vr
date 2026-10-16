@@ -278,10 +278,23 @@ bool VrWorldSoundPosition(int sourceX, int sourceY, int *volume, int *pan)
 	return loudness > ATTENUATION_MIN;
 }
 
+namespace {
+/** Set by VrWorldSetClock for the next update; negative: none. */
+float frameClock = -1;
+} // namespace
+
+void VrWorldSetClock(float seconds)
+{
+	frameClock = seconds;
+}
+
 void VrWorldUpdate(const float headPosition[3], const float headOrientation[4], const VrHandPose &leftHand, const VrHandPose &rightHand, bool pointerValid, const float pointerHit[3])
 {
 	const vr::ScopedTimer timer(vr::ProfileScope::Extract);
-	const float now = static_cast<float>(SDL_GetTicks()) / 1000.0F;
+	// A headset frame is built for the moment it is shown, and the moments are evenly spaced:
+	// what moves by the scene's time (particles, monsters gliding between tiles) moves evenly.
+	const float now = frameClock >= 0 ? frameClock : static_cast<float>(SDL_GetTicks()) / 1000.0F;
+	frameClock = -1;
 	const float dt = std::clamp(now - scene.time, 0.F, 0.1F);
 	scene.Clear();
 	scene.time = now;
