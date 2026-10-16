@@ -1,0 +1,49 @@
+--- a/libs/vkd3d-shader/hlsl.y
++++ b/libs/vkd3d-shader/hlsl.y
+@@ -6559,16 +6559,33 @@
+     return true;
+ }
+ 
++/* Screen-space derivatives have a component per texture axis: none for the array layer. */
++static unsigned int hlsl_gradient_dim_count(enum hlsl_sampler_dim dim)
++{
++    switch (dim)
++    {
++        case HLSL_SAMPLER_DIM_1DARRAY:
++            return 1;
++        case HLSL_SAMPLER_DIM_2DARRAY:
++            return 2;
++        case HLSL_SAMPLER_DIM_CUBEARRAY:
++            return 3;
++        default:
++            return hlsl_sampler_dim_count(dim);
++    }
++}
++
+ static bool add_sample_grad_method_call(struct hlsl_ctx *ctx, struct hlsl_block *block, struct hlsl_ir_node *object,
+         const char *name, const struct parse_initializer *params, const struct vkd3d_shader_location *loc)
+ {
+     const struct hlsl_type *object_type = object->data_type;
+     struct hlsl_resource_load_params load_params = { 0 };
+-    unsigned int sampler_dim, offset_dim;
++    unsigned int sampler_dim, offset_dim, gradient_dim;
+     const struct hlsl_type *sampler_type;
+ 
+     sampler_dim = hlsl_sampler_dim_count(object_type->sampler_dim);
+     offset_dim = hlsl_offset_dim_count(object_type->sampler_dim);
++    gradient_dim = hlsl_gradient_dim_count(object_type->sampler_dim);
+ 
+     load_params.type = HLSL_RESOURCE_SAMPLE_GRAD;
+ 
+@@ -6595,9 +6612,9 @@
+     load_params.coords = add_implicit_conversion(ctx, block, params->args[1],
+             hlsl_get_vector_type(ctx, HLSL_TYPE_FLOAT, sampler_dim), loc);
+     load_params.ddx = add_implicit_conversion(ctx, block, params->args[2],
+-            hlsl_get_vector_type(ctx, HLSL_TYPE_FLOAT, sampler_dim), loc);
++            hlsl_get_vector_type(ctx, HLSL_TYPE_FLOAT, gradient_dim), loc);
+     load_params.ddy = add_implicit_conversion(ctx, block, params->args[3],
+-            hlsl_get_vector_type(ctx, HLSL_TYPE_FLOAT, sampler_dim), loc);
++            hlsl_get_vector_type(ctx, HLSL_TYPE_FLOAT, gradient_dim), loc);
+ 
+     if (offset_dim && params->args_count > 4)
+         load_params.texel_offset = add_implicit_conversion(ctx, block, params->args[4],

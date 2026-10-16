@@ -581,7 +581,9 @@ void CheckMainPanelButtonUp()
 		case PanelButtonMainmenu:
 			if (MyPlayerIsDead) {
 				if (!gbIsMultiplayer) {
-					if (gbValidSaveFile)
+					if (gamemenu_can_load_autosave())
+						gamemenu_on(); // To choose between Load Game and Load Autosave
+					else if (gbValidSaveFile)
 						gamemenu_load_game(false);
 					else
 						gamemenu_exit_game(false);
@@ -819,7 +821,9 @@ void DrawDeathText(const Surface &out)
 	}
 
 	if (!gbIsMultiplayer) {
-		if (gbValidSaveFile)
+		if (gamemenu_can_load_autosave())
+			text = FormatRuntime(_("Press {} to choose a save to load."), buttonText);
+		else if (gbValidSaveFile)
 			text = FormatRuntime(_("Press {} to load last save."), buttonText);
 		else
 			text = FormatRuntime(_("Press {} to return to Main Menu."), buttonText);

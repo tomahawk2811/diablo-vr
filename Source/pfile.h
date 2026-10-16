@@ -11,6 +11,7 @@
 
 #include "DiabloUI/diabloui.h"
 #include "player.h"
+#include "utils/attributes.h"
 
 #ifdef UNPACKED_SAVES
 #include "utils/file_util.h"
@@ -24,6 +25,8 @@ namespace devilution {
 #define MAX_CHARACTERS 99
 
 extern bool gbValidSaveFile;
+/** Autosave single player games after every level change. Off by default. */
+extern DVL_API_FOR_TEST bool AutosaveEnabled;
 
 #ifdef UNPACKED_SAVES
 struct SaveReader {
@@ -100,6 +103,28 @@ std::optional<SaveReader> OpenStashArchive();
 const char *pfile_get_password();
 std::unique_ptr<std::byte[]> ReadArchive(SaveReader &archive, const char *pszName, size_t *pdwLen = nullptr);
 void pfile_write_hero(bool writeGameData = false);
+
+/**
+ * @brief Save the running single player game to the hero's autosave (e.g. single_0_auto.sv)
+ *
+ * The regular save is left as it is, so a later Save Game or Load Game behaves as without the autosave.
+ */
+void AutosaveGame();
+/** @brief Whether the current single player hero has an autosave */
+bool HasAutosave();
+/**
+ * @brief Load the hero's autosave, like LoadGame does the regular save
+ *
+ * The autosave's levels become the in-play levels of the regular save, which stays otherwise untouched.
+ * @param firstflag As for LoadGame: true when starting the game from the hero selection
+ */
+std::expected<void, std::string> LoadAutosave(bool firstflag = false);
+/** @brief Request an autosave for when the level change in progress has finished (if AutosaveEnabled) */
+void QueueAutosave();
+void CancelQueuedAutosave();
+/** @brief Runs a queued autosave once the game can be saved, called every game tick */
+void UpdateAutosave();
+void pfile_remove_autosave(uint32_t saveNum);
 
 #ifndef DISABLE_DEMOMODE
 /**

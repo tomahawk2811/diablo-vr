@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -931,6 +932,99 @@ std::vector<OptionEntryBase *> GameplayOptions::GetEntries()
 		&skipLoadingScreenThresholdMs,
 	};
 }
+
+#ifdef DEVILUTIONX_VR
+namespace {
+
+/** A DEVILUTIONX_VR_ environment variable as a number, or `fallback` when it is not set. */
+float VrEnvironment(const char *name, float fallback)
+{
+	const char *value = SDL_getenv(name);
+	return value != nullptr ? static_cast<float>(SDL_atof(value)) : fallback;
+}
+
+/** The closest of `choices` to `value`. */
+int Closest(float value, std::initializer_list<int> choices)
+{
+	int best = *choices.begin();
+	for (const int choice : choices) {
+		if (std::abs(static_cast<float>(choice) - value) < std::abs(static_cast<float>(best) - value))
+			best = choice;
+	}
+	return best;
+}
+
+VrVignette VignetteFromEnvironment()
+{
+	const float strength = VrEnvironment("DEVILUTIONX_VR_VIGNETTE", 0);
+	if (strength <= 0)
+		return VrVignette::Off;
+	return strength < 0.45F ? VrVignette::Low : (strength < 0.75F ? VrVignette::Medium : VrVignette::High);
+}
+
+} // namespace
+
+VrOptions::VrOptions()
+    : OptionCategoryBase("VR", N_("VR"), N_("VR Settings"))
+    , turnMode("Turning", OptionEntryFlags::None, N_("Turning"), N_("Turn in steps or smoothly with the right stick."),
+          VrEnvironment("DEVILUTIONX_VR_SMOOTH_TURN", 0) != 0 ? VrTurnMode::Smooth : VrTurnMode::Snap,
+          {
+              { VrTurnMode::Snap, N_("Snap") },
+              { VrTurnMode::Smooth, N_("Smooth") },
+          })
+    , snapAngle("Snap Angle", OptionEntryFlags::None, N_("Snap Angle"), N_("Degrees of one snap turn."),
+          Closest(VrEnvironment("DEVILUTIONX_VR_SNAP_TURN", 45), { 15, 30, 45, 60, 90 }), { 15, 30, 45, 60, 90 })
+    , smoothTurnSpeed("Smooth Turn Speed", OptionEntryFlags::None, N_("Smooth Turn Speed"), N_("Degrees per second of a smooth turn at full stick."),
+          Closest(VrEnvironment("DEVILUTIONX_VR_SMOOTH_TURN_SPEED", 2.0F) * 57.29578F, { 60, 90, 120, 180, 240 }), { 60, 90, 120, 180, 240 })
+    , vignette("Vignette", OptionEntryFlags::None, N_("Vignette"), N_("Darken the edge of view while moving or turning with the sticks."), VignetteFromEnvironment(),
+          {
+              { VrVignette::Off, N_("Off") },
+              { VrVignette::Low, N_("Low") },
+              { VrVignette::Medium, N_("Medium") },
+              { VrVignette::High, N_("High") },
+          })
+    , seated("Seated", OptionEntryFlags::None, N_("Seated"), N_("Raise the world so a seated player's eyes are at standing height."), VrEnvironment("DEVILUTIONX_VR_SEATED", 0) != 0)
+    , dominantHand("Dominant Hand", OptionEntryFlags::None, N_("Dominant Hand"), N_("The hand that points, holds the weapon and swings. The other one casts."),
+          VrEnvironment("DEVILUTIONX_VR_LEFT_HANDED", 0) != 0 ? VrHand::Left : VrHand::Right,
+          {
+              { VrHand::Right, N_("Right") },
+              { VrHand::Left, N_("Left") },
+          })
+    , haptics("Haptics", OptionEntryFlags::None, N_("Haptics"), N_("Strength of the controllers' buzzes, percent."),
+          Closest(VrEnvironment("DEVILUTIONX_VR_HAPTICS", 100), { 0, 25, 50, 75, 100 }), { 0, 25, 50, 75, 100 })
+    , hud("HUD", OptionEntryFlags::None, N_("HUD"), N_("Life, mana and the belt on the wrists, or as a strip low in front."),
+          VrEnvironment("DEVILUTIONX_VR_WRIST_HUD", 0) != 0 ? VrHudPlace::Wrists : VrHudPlace::Strip,
+          {
+              { VrHudPlace::Wrists, N_("Wrists") },
+              { VrHudPlace::Strip, N_("Strip") },
+          })
+    , seeThroughPanels("See-through Panels", OptionEntryFlags::None, N_("See-through Panels"), N_("Show only the interface of panels and dialogs, over the world."), VrEnvironment("DEVILUTIONX_VR_SEE_THROUGH_PANELS", 1) != 0)
+    , autosave("Autosave", OptionEntryFlags::None, N_("Autosave"), N_("Save to a separate autosave slot after every level change. The normal save is never touched."), VrEnvironment("DEVILUTIONX_VR_AUTOSAVE", 1) != 0)
+    , itemCards("Item Cards", OptionEntryFlags::None, N_("Item Cards"), N_("Pointing at an item, object or monster shows its description beside it."), VrEnvironment("DEVILUTIONX_VR_ITEM_CARDS", 1) != 0)
+    , beltGrab("Belt Grab", OptionEntryFlags::None, N_("Belt Grab"), N_("Take a potion off the belt with the grip and drink it by bringing it to your mouth."), VrEnvironment("DEVILUTIONX_VR_BELT_GRAB", 1) != 0)
+    , spellGestures("Spell Gestures", OptionEntryFlags::None, N_("Spell Gestures"), N_("Cast with a flick of the hand while holding the trigger, instead of the trigger alone."), VrEnvironment("DEVILUTIONX_VR_SPELL_GESTURES", 0) != 0)
+{
+}
+
+std::vector<OptionEntryBase *> VrOptions::GetEntries()
+{
+	return {
+		&turnMode,
+		&snapAngle,
+		&smoothTurnSpeed,
+		&vignette,
+		&seated,
+		&dominantHand,
+		&haptics,
+		&hud,
+		&seeThroughPanels,
+		&autosave,
+		&itemCards,
+		&beltGrab,
+		&spellGestures,
+	};
+}
+#endif
 
 ControllerOptions::ControllerOptions()
     : OptionCategoryBase("Controller", N_("Controller"), N_("Controller Settings"))

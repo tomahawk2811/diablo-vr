@@ -17,6 +17,10 @@
 #include "stores.h"
 #include "utils/language.h"
 
+#ifdef DEVILUTIONX_VR
+#include "platform/vr/vr.h"
+#endif
+
 namespace devilution {
 
 bool HelpFlag;
@@ -241,6 +245,26 @@ void DrawHelp(const Surface &out)
 
 void DisplayHelp()
 {
+#ifdef DEVILUTIONX_VR
+	// In the headset the controllers' own controls come first, before the keyboard's.
+	if (VrSessionRunning()) {
+		HelpTextLines.clear();
+		std::vector<std::string_view> texts(VrControlsHelp().begin(), VrControlsHelp().end());
+		for (const auto *text : HelpText)
+			texts.emplace_back(_(text));
+		for (const std::string_view text : texts) {
+			const std::string paragraph = WordWrapString(text, ContentTextWidth);
+			size_t previous = 0;
+			while (true) {
+				const size_t next = paragraph.find('\n', previous);
+				HelpTextLines.emplace_back(paragraph.substr(previous, next - previous));
+				if (next == std::string::npos)
+					break;
+				previous = next + 1;
+			}
+		}
+	}
+#endif
 	SkipLines = 0;
 	HelpFlag = true;
 	ChatLogFlag = false;

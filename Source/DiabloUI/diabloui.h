@@ -48,6 +48,7 @@ enum _selhero_selections : uint8_t {
 	SELHERO_CONTINUE,
 	SELHERO_CONNECT,
 	SELHERO_PREVIOUS,
+	SELHERO_CONTINUE_AUTOSAVE,
 };
 
 struct _uidefaultstats {
@@ -68,6 +69,7 @@ struct _uiheroinfo {
 	uint16_t dexterity;
 	uint16_t vitality;
 	bool hassaved;
+	bool hasautosave;
 	bool spawned;
 };
 

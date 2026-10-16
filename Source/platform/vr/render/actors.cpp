@@ -25,6 +25,7 @@
 #include "panels/spell_icons.hpp"
 #include "monster.h"
 #include "objects.h"
+#include "options.h"
 #include "player.h"
 #include "towners.h"
 #include "utils/log.hpp"
@@ -221,6 +222,8 @@ const SpriteSlot *AddBillboard(Scene &scene, ClxSprite sprite, Point tile, Displ
  * the game says they are instead of jumping there.
  */
 std::unordered_map<const Object *, float> doorSwing;
+/** Seconds since the scene was last updated, for what moves by itself (a swinging door). */
+float frameStep;
 
 /**
  * A door: a slab 6 cm thick with the door's picture on both faces, hanging on a hinge at one end
@@ -252,7 +255,7 @@ bool AddDoor(Scene &scene, const Object &object, ClxSprite sprite)
 	const float target = open ? 1.5707963F : 0.F;
 	auto [entry, added] = doorSwing.try_emplace(&object, target);
 	float &swing = entry->second;
-	const float step = 3.2F * std::clamp(scene.time - lastTime, 0.F, 0.1F);
+	const float step = 3.2F * frameStep;
 	swing = swing < target ? std::min(swing + step, target) : std::max(swing - step, target);
 
 	Vec3 middle = TileToWorld(object.position, 0, 0);
@@ -744,7 +747,8 @@ void AddBelt(Scene &scene)
 	const Vec3 waist = scene.headPosition + Vec3 { 0, -0.68F, 0 };
 	for (int slot = 0; slot < MaxBeltItems; slot++) {
 		const Item &item = MyPlayer->SpdList[slot];
-		if (item.isEmpty())
+		// A potion taken in a hand is drawn there instead (AddBeltHold).
+		if (item.isEmpty() || slot == beltHold.slot)
 			continue;
 		// Left to right in the game's order, round the front of the body.
 		const float angle = (static_cast<float>(slot) - 3.5F) * 0.3F;
@@ -754,6 +758,20 @@ void AddBelt(Scene &scene)
 		const int icon = item._iCurs + CURSOR_FIRSTITEM - 1;
 		CarvedAddItem(scene, icon, Compose(at, AxisAngle({ 0, 1, 0 }, yaw)), IconMeters * 0.8F, 0.02F);
 	}
+}
+
+/** A belt potion held in a hand, upright in the fist. */
+void AddBeltHold(Scene &scene, const VrHandPose &hand)
+{
+	if (beltHold.slot < 0 || beltHold.slot >= MaxBeltItems || !hand.valid)
+		return;
+	const Item &item = MyPlayer->SpdList[beltHold.slot];
+	if (item.isEmpty())
+		return;
+	const Quat orientation { hand.orientation[0], hand.orientation[1], hand.orientation[2], hand.orientation[3] };
+	const Vec3 at = Vec3 { hand.position[0], hand.position[1], hand.position[2] } + Rotate(orientation, { 0, 0.02F, 0.03F });
+	const int icon = item._iCurs + CURSOR_FIRSTITEM - 1;
+	CarvedAddItem(scene, icon, Compose(at, orientation * AxisAngle({ 1, 0, 0 }, -1.5707963F)), IconMeters * 0.8F, 0.02F);
 }
 
 /** The game's large picture of a spell (with its type's colours), stored in the atlas once per atlas epoch. */
@@ -915,6 +933,7 @@ void AddLights(Scene &scene)
 
 VrSpellRing spellRing {};
 VrHeldPanel heldPanel {};
+VrBeltHold beltHold { -1, 0 };
 
 Vec3 TileToWorld(Point tile, float screenX, float screenY)
 {
@@ -966,9 +985,15 @@ void ActorsRelease()
 
 void ActorsAddToScene(Scene &scene, const VrHandPose &leftHand, const VrHandPose &rightHand, bool pointerValid, const float pointerHit[3])
 {
+	// The weapon, the laser and the swing go with the dominant hand; the shield and the spell with
+	// the other. Gauntlets and the wrist vials stay on the hands they are made for.
+	const bool leftHanded = *GetOptions().Vr.dominantHand == VrHand::Left;
+	const VrHandPose &weaponHand = leftHanded ? leftHand : rightHand;
+	const VrHandPose &spellHand = leftHanded ? rightHand : leftHand;
 	pickables.clear();
 	const float dt = std::clamp(scene.time - lastTime, 0.F, 0.1F);
 	lastTime = scene.time;
+	frameStep = dt;
 
 	// Weapons go to the right hand and shields to the left, whichever inventory hand slot they sit in.
 	const Item &slotLeft = MyPlayer->InvBody[INVLOC_HAND_LEFT];
@@ -983,19 +1008,25 @@ void ActorsAddToScene(Scene &scene, const VrHandPose &leftHand, const VrHandPose
 		AddGauntlet(scene, rightHand, 1);
 		const Player &me = *MyPlayer;
 		// Life on the left wrist, mana on the right, as the game's orbs are on the left and right.
-		AddVial(scene, leftHand, me._pMaxHP > 0 ? static_cast<float>(me._pHitPoints) / static_cast<float>(me._pMaxHP) : 0, { 0.42F, 0.02F, 0.02F });
-		AddVial(scene, rightHand, me._pMaxMana > 0 ? static_cast<float>(me._pMana) / static_cast<float>(me._pMaxMana) : 0, { 0.03F, 0.05F, 0.45F });
+		// The wrist display (the HUD setting) puts the game's own orbs there instead.
+		if (*GetOptions().Vr.hud != VrHudPlace::Wrists) {
+			AddVial(scene, leftHand, me._pMaxHP > 0 ? static_cast<float>(me._pHitPoints) / static_cast<float>(me._pMaxHP) : 0, { 0.42F, 0.02F, 0.02F });
+			AddVial(scene, rightHand, me._pMaxMana > 0 ? static_cast<float>(me._pMana) / static_cast<float>(me._pMaxMana) : 0, { 0.03F, 0.05F, 0.45F });
+		}
 		AddBelt(scene);
-		AddSpellHand(scene, leftHand);
+		AddBeltHold(scene, beltHold.hand == 0 ? leftHand : rightHand);
+		AddSpellHand(scene, spellHand);
 		AddHeldPanel(scene);
 	}
 	if (hands && mainHand._itype != ItemType::Shield)
-		AddHeldItem(scene, mainHand, rightHand);
+		AddHeldItem(scene, mainHand, weaponHand);
 	if (hands)
-		AddHeldItem(scene, mainHand._itype == ItemType::Shield ? mainHand : offHand, leftHand);
-	if (hands && pointerValid && rightHand.valid)
-		AddPointer(scene, rightHand, pointerHit);
-	FeedbackAddToScene(scene, hands && pointerValid && rightHand.valid, pointerHit);
+		AddHeldItem(scene, mainHand._itype == ItemType::Shield ? mainHand : offHand, spellHand);
+	// The laser is normally a layer over everything (xr_laser.cpp); DEVILUTIONX_VR_LASER_LAYER=0 draws it here.
+	static const bool laserInWorld = Knob("DEVILUTIONX_VR_LASER_LAYER", 1) == 0;
+	if (hands && laserInWorld && pointerValid && weaponHand.valid)
+		AddPointer(scene, weaponHand, pointerHit);
+	FeedbackAddToScene(scene, hands && pointerValid && weaponHand.valid, pointerHit);
 
 	// Blob shadows are particles and must be listed before the sparks that glow over them.
 	if (leveltype == DTYPE_TOWN) {

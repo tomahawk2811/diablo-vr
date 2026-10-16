@@ -874,6 +874,62 @@ private:
 	std::optional<std::forward_list<ModEntry>> modEntries;
 };
 
+#ifdef DEVILUTIONX_VR
+enum class VrTurnMode : uint8_t {
+	Snap,
+	Smooth,
+};
+
+enum class VrHand : uint8_t {
+	Right,
+	Left,
+};
+
+enum class VrHudPlace : uint8_t {
+	Wrists,
+	Strip,
+};
+
+enum class VrVignette : uint8_t {
+	Off,
+	Low,
+	Medium,
+	High,
+};
+
+/** The VR mode's settings. Defaults come from the DEVILUTIONX_VR_ environment variables where set. */
+struct VrOptions : OptionCategoryBase {
+	VrOptions();
+	std::vector<OptionEntryBase *> GetEntries() override;
+
+	OptionEntryEnum<VrTurnMode> turnMode;
+	/** @brief Degrees of a snap turn. */
+	OptionEntryInt<int> snapAngle;
+	/** @brief Degrees per second of a smooth turn at full stick. */
+	OptionEntryInt<int> smoothTurnSpeed;
+	/** @brief How dark the edge of view gets while the view moves without the head moving it. */
+	OptionEntryEnum<VrVignette> vignette;
+	/** @brief Seated play: the world is raised so the eyes are at a standing person's height. */
+	OptionEntryBoolean seated;
+	/** @brief The hand that points, holds the weapon and swings. */
+	OptionEntryEnum<VrHand> dominantHand;
+	/** @brief Strength of the controllers' buzzes, percent. */
+	OptionEntryInt<int> haptics;
+	/** @brief Life, mana and the belt on the wrists or as a strip low in front. */
+	OptionEntryEnum<VrHudPlace> hud;
+	/** @brief Only the interface of panels and dialogs is shown, over the world. */
+	OptionEntryBoolean seeThroughPanels;
+	/** @brief Save to the autosave slot after every level change. */
+	OptionEntryBoolean autosave;
+	/** @brief Pointing at an item, object or monster shows its description beside it. */
+	OptionEntryBoolean itemCards;
+	/** @brief Potions are taken off the belt with a grip and drunk by bringing them to the mouth. */
+	OptionEntryBoolean beltGrab;
+	/** @brief Spells are cast with a flick of the hand instead of the trigger alone. */
+	OptionEntryBoolean spellGestures;
+};
+#endif
+
 struct Options {
 	GameModeOptions GameMode;
 	StartUpOptions StartUp;
@@ -889,6 +945,9 @@ struct Options {
 	KeymapperOptions Keymapper;
 	PadmapperOptions Padmapper;
 	ModOptions Mods;
+#ifdef DEVILUTIONX_VR
+	VrOptions Vr;
+#endif
 
 	[[nodiscard]] std::vector<OptionCategoryBase *> GetCategories()
 	{
@@ -898,6 +957,9 @@ struct Options {
 			&GameMode,
 			&StartUp,
 			&Graphics,
+#ifdef DEVILUTIONX_VR
+			&Vr,
+#endif
 			&Audio,
 			&Diablo,
 			&Hellfire,

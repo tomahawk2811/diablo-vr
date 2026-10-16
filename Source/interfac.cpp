@@ -23,6 +23,7 @@
 
 #include "control/control.hpp"
 #include "controls/input.h"
+#include "diablo.h"
 #include "engine/clx_sprite.hpp"
 #include "engine/dx.h"
 #include "engine/events.hpp"
@@ -35,6 +36,7 @@
 #include "headless_mode.hpp"
 #include "hwcursor.hpp"
 #include "loadsave.h"
+#include "menu.h"
 #include "multi.h"
 #include "pfile.h"
 #include "plrmsg.h"
@@ -320,7 +322,7 @@ void DoLoad(interface_mode uMsg)
 	switch (uMsg) {
 	case WM_DIABLOADGAME:
 		IncProgress(2);
-		loadResult = LoadGame(true);
+		loadResult = gbLoadAutosave ? LoadAutosave(true) : LoadGame(true);
 		if (loadResult.has_value()) IncProgress(2);
 		break;
 	case WM_DIABNEWGAME:
@@ -329,6 +331,8 @@ void DoLoad(interface_mode uMsg)
 		FreeGameMem();
 		IncProgress();
 		pfile_remove_temp_files();
+		// An autosave of the hero's previous game must not be offered in the new one.
+		pfile_remove_autosave(gSaveNumber);
 		IncProgress();
 		loadResult = LoadGameLevel(true, ENTRY_MAIN);
 		if (loadResult.has_value()) IncProgress();
@@ -480,6 +484,11 @@ void DoLoad(interface_mode uMsg)
 #endif
 		return;
 	}
+
+	if (uMsg == WM_DIABLOADGAME || uMsg == WM_DIABNEWGAME)
+		CancelQueuedAutosave();
+	else
+		QueueAutosave();
 
 	SDL_Event event;
 	CustomEventToSdlEvent(event, WM_DONE);

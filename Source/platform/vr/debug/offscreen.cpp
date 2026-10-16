@@ -8,11 +8,13 @@
 #include <algorithm>
 #include <cmath>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "diablo.h"
 #include "interfac.h"
 #include "levels/dun_tile_data.hpp"
+#include "objects.h"
 #include "platform/vr/debug/profile.h"
 #include "platform/vr/render/gpu.h"
 #include "platform/vr/render/world.h"
@@ -55,6 +57,8 @@ bool EnsureOffscreen(int width, int height)
 	return VrWorldAvailable() && colorView[1] != nullptr;
 }
 
+} // namespace
+
 /** Goes to a dungeon level whose layout is the same in every run, so two builds can be compared. */
 void EnterLevel(int level)
 {
@@ -65,6 +69,8 @@ void EnterLevel(int level)
 	InitQuests(); // Which quests are in the game, and so their set pieces, comes from the seeds.
 	StartNewLvl(*MyPlayer, WM_DIABNEXTLVL, level);
 }
+
+namespace {
 
 VrView MakeView(const float position[3], const float orientation[4], const XrFovf &fov, float sideways = 0)
 {
@@ -134,6 +140,77 @@ void UpdateScene(float yaw, float pitch, float position[3], float orientation[4]
 		if (!logged)
 			LogInfo("VR: debug camera at monster {} ({}, {}): {}", debugMonster, monster.position.tile.x, monster.position.tile.y, found ? "placed" : "no open spot");
 		logged = true;
+	}
+	// DEVILUTIONX_VR_DEBUG_OBJECT=doorway: look straight at the level's n-th doorway built in 3D
+	// (DEVILUTIONX_VR_DEBUG_DOORWAY=<n>, from 0) from about two tiles out, to see the walls beside it.
+	static const char *const objectKind = SDL_getenv("DEVILUTIONX_VR_DEBUG_OBJECT");
+	if (objectKind != nullptr && std::string(objectKind) == "doorway" && leveltype != DTYPE_TOWN) {
+		static const int index = static_cast<int>(Knob("DEVILUTIONX_VR_DEBUG_DOORWAY", 0));
+		int tileX;
+		int tileY;
+		bool alongX;
+		if (VrWorldBuiltDoorway(index, tileX, tileY, alongX)) {
+			const float tile = VrWorldTileSize();
+			const float cx = (static_cast<float>(tileX) + 0.5F) * tile;
+			const float cz = (static_cast<float>(tileY) + 0.5F) * tile;
+			for (const float side : { -1.F, 1.F }) {
+				const float x = cx + (alongX ? side * 2.4F * tile : 0);
+				const float z = cz + (alongX ? 0 : side * 2.4F * tile);
+				if (VrWorldCanStand(x, z)) {
+					worldOrigin[0] = x;
+					worldOrigin[2] = z;
+					yaw = std::atan2(-(cx - x), -(cz - z));
+					break;
+				}
+			}
+			static bool logged;
+			if (!logged)
+				LogInfo("VR: debug camera at doorway {} ({}, {}), level type {}", index, tileX, tileY, static_cast<int>(leveltype));
+			logged = true;
+		}
+	}
+	// DEVILUTIONX_VR_DEBUG_OBJECT=chest, sarc or door: look at the level's first one from about two
+	// tiles away, and open it 200 frames in the way the game does, to see it open.
+	if (objectKind != nullptr && std::string(objectKind) != "doorway") {
+		static Object *watched;
+		static float spot[2];
+		static int frames;
+		if (watched == nullptr && leveltype != DTYPE_TOWN) {
+			const std::string kind = objectKind;
+			for (int i = 0; i < ActiveObjectCount && watched == nullptr; i++) {
+				Object &object = Objects[ActiveObjects[i]];
+				const bool wanted = (kind == "chest" && object.IsChest()) || (kind == "sarc" && object._otype == OBJ_SARC) || (kind == "door" && object.isDoor());
+				for (int j = 0; j < 16 && wanted && watched == nullptr; j++) {
+					const float angle = static_cast<float>(j) * 0.3927F;
+					const float x = (static_cast<float>(object.position.x) + 0.5F + 2.2F * std::cos(angle)) * VrWorldTileSize();
+					const float z = (static_cast<float>(object.position.y) + 0.5F + 2.2F * std::sin(angle)) * VrWorldTileSize();
+					if (VrWorldCanStand(x, z)) {
+						watched = &object;
+						spot[0] = x;
+						spot[1] = z;
+						LogInfo("VR: debug camera at {} ({}, {}), frame {}", kind, object.position.x, object.position.y, object._oAnimFrame);
+					}
+				}
+			}
+		}
+		if (watched != nullptr) {
+			worldOrigin[0] = spot[0];
+			worldOrigin[2] = spot[1];
+			const float dx = (static_cast<float>(watched->position.x) + 0.5F) * VrWorldTileSize() - spot[0];
+			const float dz = (static_cast<float>(watched->position.y) + 0.5F) * VrWorldTileSize() - spot[1];
+			yaw = std::atan2(-dx, -dz);
+			if (++frames == 200) {
+				if (watched->IsChest()) {
+					watched->_oAnimFrame += 2;
+				} else if (watched->_otype == OBJ_SARC) {
+					watched->_oAnimFlag = true;
+					watched->_oAnimDelay = 3;
+				} else {
+					watched->_oVar4 = 1; // DOOR_OPEN (objects.cpp)
+				}
+				LogInfo("VR: debug object opened");
+			}
+		}
 	}
 	turnYaw = yaw;
 	const XrPosef local { { std::sin(pitch / 2), 0, 0, std::cos(pitch / 2) }, { 0, 1.65F, 0 } };
@@ -218,8 +295,8 @@ void WriteBench(const char *directory, int level, int width, int height, float s
 	    worst.drawCalls, worst.triangles, worst.meshInstances, worst.sprites, worst.particles, worst.lights,
 	    megabytes(render::MemoryKind::Targets), megabytes(render::MemoryKind::Textures), megabytes(render::MemoryKind::Geometry), megabytes(render::MemoryKind::Dynamic),
 	    static_cast<double>(ProfileVramBytes()) / (1024.0 * 1024.0));
-	char path[MAX_PATH];
-	SDL_snprintf(path, sizeof(path), "%s%sbench.json", directory, *directory != 0 ? "\\" : "");
+	char path[1024];
+	SDL_snprintf(path, sizeof(path), "%s%sbench.json", directory, *directory != 0 ? "/" : "");
 	if (SDL_RWops *file = SDL_RWFromFile(path, "wb"); file != nullptr) {
 		SDL_RWwrite(file, text, 1, SDL_strlen(text));
 		SDL_RWclose(file);
@@ -288,8 +365,8 @@ void DebugOffscreen(const char *directory)
 	// The first two turns are skipped: a level change asked for at frame 30 takes a few frames to happen.
 	static int captured;
 	if (captured < 8 && frame >= 80 && frame % 40 == 39) {
-		char path[MAX_PATH];
-		SDL_snprintf(path, sizeof(path), "%s\\eye%d.bmp", directory, shot);
+		char path[1024];
+		SDL_snprintf(path, sizeof(path), "%s/eye%d.bmp", directory, shot);
 		DumpTexture(color[0], path);
 		if (++captured == 8) {
 			// Both eyes in one pass, the way the headset is fed.
@@ -297,12 +374,12 @@ void DebugOffscreen(const char *directory)
 			const VrViewTarget targets[2] = { { colorView[0], nullptr, nullptr, 0 }, { colorView[1], nullptr, nullptr, 0 } };
 			VrWorldRender(views, 2, Width, Height, targets);
 			for (int eye = 0; eye < 2; eye++) {
-				SDL_snprintf(path, sizeof(path), "%s\\stereo%d.bmp", directory, eye);
+				SDL_snprintf(path, sizeof(path), "%s/stereo%d.bmp", directory, eye);
 				DumpTexture(color[eye], path);
 			}
-			SDL_snprintf(path, sizeof(path), "%s\\atlas.bmp", directory);
+			SDL_snprintf(path, sizeof(path), "%s/atlas.bmp", directory);
 			VrWorldDumpAtlas(path);
-			SDL_snprintf(path, sizeof(path), "%s\\done", directory);
+			SDL_snprintf(path, sizeof(path), "%s/done", directory);
 			if (SDL_RWops *marker = SDL_RWFromFile(path, "wb"); marker != nullptr)
 				SDL_RWclose(marker);
 		}

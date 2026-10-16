@@ -66,11 +66,19 @@ std::vector<std::unique_ptr<UiItemBase>> vecSelDlgItems;
 
 UiImageClx *SELHERO_DIALOG_HERO_IMG;
 
+/** Values of the items of the Load Game / New Game choice. */
+enum : uint8_t {
+	SelheroLoadGame,
+	SelheroNewGame,
+	SelheroLoadAutosave,
+};
+
 void SelheroListFocus(size_t value);
 void SelheroListSelect(size_t value);
 void SelheroListEsc();
 void SelheroLoadFocus(size_t value);
 void SelheroLoadSelect(size_t value);
+void SelheroStartNewGame();
 void SelheroNameSelect(size_t value);
 void SelheroNameEsc();
 void SelheroClassSelectorFocus(size_t value);
@@ -214,15 +222,18 @@ void SelheroListSelect(size_t value)
 		return;
 	}
 
-	if (selhero_heroInfo.hassaved) {
+	if (selhero_heroInfo.hassaved || selhero_heroInfo.hasautosave) {
 		vecSelDlgItems.clear();
 
 		const SDL_Rect rect1 = { (Sint16)(uiPosition.x + 242), (Sint16)(uiPosition.y + 211), 365, 33 };
 		vecSelDlgItems.push_back(std::make_unique<UiArtText>(_("Save File Exists").data(), rect1, UiFlags::AlignCenter | UiFlags::FontSize30 | UiFlags::ColorUiSilver, 3));
 
 		vecSelHeroDlgItems.clear();
-		vecSelHeroDlgItems.push_back(std::make_unique<UiListItem>(_("Load Game"), 0));
-		vecSelHeroDlgItems.push_back(std::make_unique<UiListItem>(_("New Game"), 1));
+		if (selhero_heroInfo.hassaved)
+			vecSelHeroDlgItems.push_back(std::make_unique<UiListItem>(_("Load Game"), SelheroLoadGame));
+		if (selhero_heroInfo.hasautosave)
+			vecSelHeroDlgItems.push_back(std::make_unique<UiListItem>(_("Load Autosave"), SelheroLoadAutosave));
+		vecSelHeroDlgItems.push_back(std::make_unique<UiListItem>(_("New Game"), SelheroNewGame));
 		vecSelDlgItems.push_back(std::make_unique<UiList>(vecSelHeroDlgItems, vecSelHeroDlgItems.size(), uiPosition.x + 265, (uiPosition.y + 285), 320, 33, UiFlags::AlignCenter | UiFlags::FontSize24 | UiFlags::ColorUiGold));
 
 		const SDL_Rect rect2 = { (Sint16)(uiPosition.x + 279), (Sint16)(uiPosition.y + 427), 140, 35 };
@@ -236,7 +247,7 @@ void SelheroListSelect(size_t value)
 		return;
 	}
 
-	SelheroLoadSelect(1);
+	SelheroStartNewGame();
 }
 
 void SelheroListEsc()
@@ -341,7 +352,7 @@ void SelheroNameSelect(size_t /*value*/)
 		AddSelHeroBackground();
 	} else {
 		if (gfnHeroCreate(&selhero_heroInfo)) {
-			SelheroLoadSelect(1);
+			SelheroStartNewGame();
 			return;
 		}
 		UiErrorOkDialog(_(/* TRANSLATORS: Error Message */ "Unable to create character."), vecSelHeroDialog);
@@ -362,12 +373,27 @@ void SelheroLoadFocus(size_t value)
 
 void SelheroLoadSelect(size_t value)
 {
+	switch (vecSelHeroDlgItems[value]->m_value) {
+	case SelheroLoadGame:
+		UiInitList_clear();
+		selhero_endMenu = true;
+		selhero_result = SELHERO_CONTINUE;
+		break;
+	case SelheroLoadAutosave:
+		UiInitList_clear();
+		selhero_endMenu = true;
+		selhero_result = SELHERO_CONTINUE_AUTOSAVE;
+		break;
+	default:
+		SelheroStartNewGame();
+		break;
+	}
+}
+
+void SelheroStartNewGame()
+{
 	UiInitList_clear();
 	selhero_endMenu = true;
-	if (vecSelHeroDlgItems[value]->m_value == 0) {
-		selhero_result = SELHERO_CONTINUE;
-		return;
-	}
 
 	if (!selhero_isMultiPlayer) {
 		// This is part of a dangerous hack to enable difficulty selection in single-player.

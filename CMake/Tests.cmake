@@ -67,6 +67,7 @@ set(standalone_tests
   static_vector_test
   str_cat_test
   utf8_test
+  vr_input_rules_test
 )
 if(NOT USE_SDL1)
   list(APPEND standalone_tests text_render_integration_test)

@@ -30,6 +30,10 @@
 #include "controls/touch/renderers.h"
 #endif
 
+#ifdef DEVILUTIONX_VR
+#include "platform/vr/vr.h"
+#endif
+
 namespace devilution {
 
 bool isGameMenuOpen = false;
@@ -44,6 +48,9 @@ void GamemenuMusicVolume(bool bActivate);
 void GamemenuSoundVolume(bool bActivate);
 void GamemenuBrightness(bool bActivate);
 void GamemenuSpeed(bool bActivate);
+#ifdef DEVILUTIONX_VR
+void GamemenuVrSettings(bool bActivate);
+#endif
 
 /** Contains the game menu items of the single player menu. */
 TMenuItem sgSingleMenu[] = {
@@ -57,6 +64,21 @@ TMenuItem sgSingleMenu[] = {
 	{ GMENU_ENABLED, nullptr,                 nullptr             },
 	// clang-format on
 };
+/** Contains the game menu items of the single player menu when the hero has an autosave. */
+TMenuItem sgSingleAutosaveMenu[] = {
+	// clang-format off
+	// dwFlags,      pszStr,                  fnMenu
+	{ GMENU_ENABLED, N_("Options"),           &GamemenuOptions        },
+	{ GMENU_ENABLED, N_("Save Game"),         &gamemenu_save_game     },
+	{ GMENU_ENABLED, N_("Load Game"),         &gamemenu_load_game     },
+	{ GMENU_ENABLED, N_("Load Autosave"),     &gamemenu_load_autosave },
+	{ GMENU_ENABLED, N_("Exit to Main Menu"), &GamemenuNewGame        },
+	{ GMENU_ENABLED, N_("Quit Game"),         &gamemenu_quit_game     },
+	{ GMENU_ENABLED, nullptr,                 nullptr                 },
+	// clang-format on
+};
+/** The single player menu that is shown, either sgSingleMenu or sgSingleAutosaveMenu. */
+TMenuItem *sgpSingleMenu = sgSingleMenu;
 /** Contains the game menu items of the multi player menu. */
 TMenuItem sgMultiMenu[] = {
 	// clang-format off
@@ -74,6 +96,9 @@ TMenuItem sgOptionsMenu[] = {
 	{ GMENU_ENABLED | GMENU_SLIDER, nullptr,             &GamemenuSoundVolume  },
 	{ GMENU_ENABLED | GMENU_SLIDER, N_("Gamma"),         &GamemenuBrightness   },
 	{ GMENU_ENABLED | GMENU_SLIDER, N_("Speed"),         &GamemenuSpeed        },
+#ifdef DEVILUTIONX_VR
+	{ GMENU_ENABLED               , N_("VR Settings"),   &GamemenuVrSettings   },
+#endif
 	{ GMENU_ENABLED               , N_("Previous Menu"), &GamemenuPrevious     },
 	{ GMENU_ENABLED               , nullptr,             nullptr               },
 	// clang-format on
@@ -91,11 +116,11 @@ const char *const SoundToggleNames[] = {
 
 void GamemenuUpdateSingle()
 {
-	sgSingleMenu[2].setEnabled(gbValidSaveFile);
+	sgpSingleMenu[2].setEnabled(gbValidSaveFile);
 
 	const bool enable = MyPlayer->_pmode != PM_DEATH && !MyPlayerIsDead;
 
-	sgSingleMenu[0].setEnabled(enable);
+	sgpSingleMenu[0].setEnabled(enable);
 }
 
 void GamemenuPrevious(bool /*bActivate*/)
@@ -188,8 +213,18 @@ void GamemenuOptions(bool /*bActivate*/)
 	GamemenuGetSound();
 	GamemenuGetBrightness();
 	GamemenuGetSpeed();
+#ifdef DEVILUTIONX_VR
+	sgOptionsMenu[4].setEnabled(VrEnabled);
+#endif
 	gmenu_set_items(sgOptionsMenu, nullptr);
 }
+
+#ifdef DEVILUTIONX_VR
+void GamemenuVrSettings(bool /*bActivate*/)
+{
+	VrSettingsMenu(&GamemenuOptions);
+}
+#endif
 
 void GamemenuMusicVolume(bool bActivate)
 {
@@ -277,24 +312,8 @@ void GamemenuSpeed(bool bActivate)
 	gnTickDelay = 1000 / sgGameInitInfo.nTickRate;
 }
 
-} // namespace
-
-void gamemenu_exit_game(bool bActivate)
-{
-	GamemenuNewGame(bActivate);
-}
-
-void gamemenu_quit_game(bool bActivate)
-{
-	GamemenuNewGame(bActivate);
-#ifndef NOEXIT
-	gbRunGameResult = false;
-#else
-	ReturnToMainMenu = true;
-#endif
-}
-
-void gamemenu_load_game(bool /*bActivate*/)
+/** @brief Load the regular save or the autosave of the running single player game */
+void GamemenuLoad(bool autosave)
 {
 	EventHandler saveProc = SetEventHandler(DisableInputEventHandler);
 	gamemenu_off();
@@ -309,7 +328,8 @@ void gamemenu_load_game(bool /*bActivate*/)
 	DeactivateVirtualGamepad();
 	FreeVirtualGamepadTextures();
 #endif
-	if (std::expected<void, std::string> result = LoadGame(false); !result.has_value()) {
+	CancelQueuedAutosave();
+	if (std::expected<void, std::string> result = autosave ? LoadAutosave() : LoadGame(false); !result.has_value()) {
 		app_fatal(result.error());
 	}
 #if !defined(USE_SDL1) && !defined(__vita__)
@@ -330,6 +350,40 @@ void gamemenu_load_game(bool /*bActivate*/)
 	NewCursor(CURSOR_HAND);
 	interface_msg_pump();
 	SetEventHandler(saveProc);
+}
+
+} // namespace
+
+void gamemenu_exit_game(bool bActivate)
+{
+	GamemenuNewGame(bActivate);
+}
+
+void gamemenu_quit_game(bool bActivate)
+{
+	GamemenuNewGame(bActivate);
+#ifndef NOEXIT
+	gbRunGameResult = false;
+#else
+	ReturnToMainMenu = true;
+#endif
+}
+
+void gamemenu_load_game(bool /*bActivate*/)
+{
+	GamemenuLoad(/*autosave=*/false);
+}
+
+void gamemenu_load_autosave(bool /*bActivate*/)
+{
+	GamemenuLoad(/*autosave=*/true);
+}
+
+bool gamemenu_can_load_autosave()
+{
+	// Offered even with AutosaveEnabled off: turning autosave off must not hide an autosave the hero has.
+	// Demos replay input recorded against the regular menu, so they never get the extra entry.
+	return !gbIsMultiplayer && !demo::IsRunning() && !demo::IsRecording() && HasAutosave();
 }
 
 void gamemenu_save_game(bool /*bActivate*/)
@@ -367,7 +421,8 @@ void gamemenu_on()
 {
 	isGameMenuOpen = true;
 	if (!gbIsMultiplayer) {
-		gmenu_set_items(sgSingleMenu, GamemenuUpdateSingle);
+		sgpSingleMenu = gamemenu_can_load_autosave() ? sgSingleAutosaveMenu : sgSingleMenu;
+		gmenu_set_items(sgpSingleMenu, GamemenuUpdateSingle);
 	} else {
 		gmenu_set_items(sgMultiMenu, nullptr);
 	}

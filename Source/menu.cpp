@@ -127,7 +127,8 @@ bool mainmenu_select_hero_dialog(GameData *gameData)
 		    &gSaveNumber,
 		    &gameData->nDifficulty);
 
-		gbLoadGame = (dlgresult == SELHERO_CONTINUE);
+		gbLoadAutosave = (dlgresult == SELHERO_CONTINUE_AUTOSAVE);
+		gbLoadGame = (dlgresult == SELHERO_CONTINUE) || gbLoadAutosave;
 	} else {
 		pSaveNumberFromOptions = gbIsHellfire ? &GetOptions().Hellfire.lastMultiplayerHero : &GetOptions().Diablo.lastMultiplayerHero;
 		gSaveNumber = **pSaveNumberFromOptions;

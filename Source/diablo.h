@@ -79,6 +79,8 @@ extern bool gbRunGameResult;
 extern bool ReturnToMainMenu;
 extern bool gbProcessPlayers;
 extern DVL_API_FOR_TEST bool gbLoadGame;
+/** Set with gbLoadGame when the hero's autosave is to be loaded instead of the regular save. */
+extern DVL_API_FOR_TEST bool gbLoadAutosave;
 extern bool cineflag;
 /* These are defined in fonts.h */
 extern void FontsCleanup();

@@ -23,6 +23,7 @@
 
 #include "appfat.h"
 #include "codec.h"
+#include "cursor.h"
 #include "engine/load_file.hpp"
 #include "engine/render/primitive_render.hpp"
 #include "game_mode.hpp"
@@ -37,6 +38,7 @@
 #include "utils/endian_swap.hpp"
 #include "utils/file_util.h"
 #include "utils/language.h"
+#include "utils/log.hpp"
 #include "utils/parse_int.hpp"
 #include "utils/paths.h"
 #include "utils/sdl_compat.h"
@@ -63,11 +65,18 @@ namespace devilution {
 #define PASSWORD_MULTI "szqnlsk1"
 
 bool gbValidSaveFile;
+bool AutosaveEnabled = false;
 
 namespace {
 
 /** List of character names for the character selection screen. */
 char hero_names[MAX_CHARACTERS][PlayerNameLength];
+
+/** Set while LoadAutosave runs LoadGame, so that the hero's save archive resolves to its autosave. */
+bool RedirectToAutosave = false;
+
+/** An autosave is due once the level change that queued it has finished. */
+bool AutosavePending = false;
 
 // Effective save-file extension token (no leading dot). Defaults to "sv"; an active mod may
 // override the save namespace by declaring `saveExtension` in its manifest.
@@ -77,7 +86,11 @@ std::string_view GetSaveExtension()
 	return modExtension.empty() ? std::string_view("sv") : modExtension;
 }
 
-std::string GetSavePath(uint32_t saveNum, std::string_view savePrefix = {})
+/**
+ * @brief Path of a hero's save archive
+ * @param autosave Selects the hero's autosave (e.g. single_0_auto.sv) instead of the regular save
+ */
+std::string GetSavePath(uint32_t saveNum, std::string_view savePrefix = {}, bool autosave = false)
 {
 	const std::string_view ext = GetSaveExtension();
 	return StrCat(paths::PrefPath(), savePrefix,
@@ -85,6 +98,7 @@ std::string GetSavePath(uint32_t saveNum, std::string_view savePrefix = {})
 	        ? (gbIsMultiplayer ? "share_" : "spawn_")
 	        : (gbIsMultiplayer ? "multi_" : "single_"),
 	    saveNum,
+	    (autosave || RedirectToAutosave) ? "_auto" : "",
 #ifdef UNPACKED_SAVES
 	    "_", ext, DIRECTORY_SEPARATOR_STR
 #else
@@ -188,13 +202,12 @@ SaveWriter GetStashWriter()
 	return SaveWriter(GetStashSavePath(), /*carryForward=*/true);
 }
 
-#ifndef DISABLE_DEMOMODE
 void CopySaveFile(uint32_t saveNum, std::string targetPath)
 {
 	const std::string savePath = GetSavePath(saveNum);
 #if defined(UNPACKED_SAVES)
 #ifdef DVL_NO_FILESYSTEM
-#error "UNPACKED_SAVES requires either DISABLE_DEMOMODE or C++17 <filesystem>"
+#error "UNPACKED_SAVES requires C++17 <filesystem>"
 #endif
 	if (!targetPath.empty()) {
 		CreateDir(targetPath.c_str());
@@ -206,9 +219,8 @@ void CopySaveFile(uint32_t saveNum, std::string targetPath)
 	CopyFileOverwrite(savePath.c_str(), targetPath.c_str());
 #endif
 }
-#endif
 
-void Game2UiPlayer(const Player &player, _uiheroinfo *heroinfo, bool bHasSaveFile)
+void Game2UiPlayer(const Player &player, _uiheroinfo *heroinfo, bool bHasSaveFile, bool bHasAutosave = false)
 {
 	CopyUtf8(heroinfo->name, player._pName, sizeof(heroinfo->name));
 	heroinfo->level = player.getCharacterLevel();
@@ -218,6 +230,7 @@ void Game2UiPlayer(const Player &player, _uiheroinfo *heroinfo, bool bHasSaveFil
 	heroinfo->dexterity = player._pDexterity;
 	heroinfo->vitality = player._pVitality;
 	heroinfo->hassaved = bHasSaveFile;
+	heroinfo->hasautosave = bHasAutosave;
 	heroinfo->herorank = player.pDiabloKillLevel;
 	heroinfo->spawned = gbIsSpawn;
 }
@@ -541,6 +554,37 @@ void pfile_write_hero(SaveWriter &saveWriter, bool writeGameData)
 	}
 }
 
+/**
+ * @brief Make the levels of a just loaded autosave the in-play levels of the regular save
+ *
+ * The regular save keeps the levels visited since the last save as temp entries, and LoadLevel prefers
+ * them over the perm ones. Copying the autosave's levels in as temp entries lets the game continue from
+ * the autosave, while Load Game still drops them and Save Game still turns them into perm levels.
+ */
+void CopyAutosaveLevelsToTemp(uint32_t saveNum)
+{
+	std::optional<SaveReader> autosave = CreateSaveReader(GetSavePath(saveNum, {}, /*autosave=*/true));
+	SaveWriter saveWriter = GetSaveWriter(saveNum);
+	saveWriter.RemoveHashEntries(GetTempSaveNames);
+	if (!autosave)
+		return;
+
+	char szPerm[MaxMpqPathSize];
+	char szTemp[MaxMpqPathSize];
+	for (uint8_t i = 0; GetPermSaveNames(i, szPerm); i++) {
+		if (!autosave->HasFile(szPerm))
+			continue;
+		// Copied still encoded: both archives use the same password.
+		size_t size;
+		int32_t error;
+		const std::unique_ptr<std::byte[]> data = autosave->ReadFile(szPerm, size, error);
+		if (error != 0 || data == nullptr)
+			continue;
+		GetTempSaveNames(i, szTemp);
+		saveWriter.WriteFile(szTemp, data.get(), size);
+	}
+}
+
 void RemoveAllInvalidItems(Player &player)
 {
 	for (int i = 0; i < NUM_INVLOC; i++)
@@ -653,6 +697,85 @@ void pfile_write_hero(bool writeGameData)
 #endif
 }
 
+void AutosaveGame()
+{
+	if (gbIsMultiplayer)
+		return;
+
+	// A save into a copy of the regular archive: it brings along the perm levels and the in-play
+	// temp levels, which the save then turns into perm levels of the copy only.
+	const std::string autosavePath = GetSavePath(gSaveNumber, {}, /*autosave=*/true);
+	CopySaveFile(gSaveNumber, autosavePath);
+	{
+		SaveWriter saveWriter(autosavePath.c_str());
+		pfile_write_hero(saveWriter, /*writeGameData=*/true);
+	}
+
+#ifdef __EMSCRIPTEN__
+	emscripten_run_script("if (typeof Module !== 'undefined' && Module.saveToIndexedDB) Module.saveToIndexedDB();");
+#endif
+}
+
+bool HasAutosave()
+{
+	return !gbIsMultiplayer && FileExists(GetSavePath(gSaveNumber, {}, /*autosave=*/true));
+}
+
+std::expected<void, std::string> LoadAutosave(bool firstflag)
+{
+	AutosavePending = false;
+
+	// LoadGame reads (and may convert) the autosave in place of the regular save. A conversion saves
+	// the game, which must not mark the regular save as holding a game.
+	const bool validSaveFile = gbValidSaveFile;
+	RedirectToAutosave = true;
+	std::expected<void, std::string> result = LoadGame(firstflag);
+	RedirectToAutosave = false;
+	gbValidSaveFile = validSaveFile;
+	if (!result.has_value())
+		return result;
+
+	CopyAutosaveLevelsToTemp(gSaveNumber);
+	return {};
+}
+
+void QueueAutosave()
+{
+	AutosavePending = AutosaveEnabled && !gbIsMultiplayer;
+}
+
+void CancelQueuedAutosave()
+{
+	AutosavePending = false;
+}
+
+void UpdateAutosave()
+{
+	if (!AutosavePending)
+		return;
+
+	const Player &myPlayer = *MyPlayer;
+	if (!AutosaveEnabled || gbIsMultiplayer || myPlayer._pmode == PM_DEATH || MyPlayerIsDead || myPlayer.hasNoLife()) {
+		AutosavePending = false;
+		return;
+	}
+	// Wait for the level change to finish and for the hand to be empty: an item held on the cursor is not saved.
+	if (myPlayer._pLvlChanging || pcurs >= CURSOR_FIRSTITEM)
+		return;
+
+	AutosavePending = false;
+	const Uint64 started = SDL_GetPerformanceCounter();
+	AutosaveGame();
+	LogVerbose("Autosave written in {:.1f} ms", static_cast<double>(SDL_GetPerformanceCounter() - started) * 1000.0 / static_cast<double>(SDL_GetPerformanceFrequency()));
+}
+
+void pfile_remove_autosave(uint32_t saveNum)
+{
+	const std::string autosavePath = GetSavePath(saveNum, {}, /*autosave=*/true);
+	if (FileExists(autosavePath))
+		RemoveFile(autosavePath.c_str());
+}
+
 #ifndef DISABLE_DEMOMODE
 void pfile_write_hero_demo(int demo)
 {
@@ -715,7 +838,8 @@ bool pfile_ui_set_hero_infos(bool (*uiAddHeroInfo)(_uiheroinfo *))
 				RemoveAllInvalidItems(player);
 				CalcPlrInv(player, false);
 
-				Game2UiPlayer(player, &uihero, hasSaveGame);
+				const bool hasAutosave = !gbIsMultiplayer && FileExists(GetSavePath(i, {}, /*autosave=*/true));
+				Game2UiPlayer(player, &uihero, hasSaveGame, hasAutosave);
 				uiAddHeroInfo(&uihero);
 			}
 		}
@@ -756,6 +880,7 @@ bool pfile_ui_save_create(_uiheroinfo *heroinfo)
 
 	SaveWriter saveWriter = GetSaveWriter(saveNum, /*carryForward=*/false);
 	saveWriter.RemoveHashEntries(GetFileName);
+	pfile_remove_autosave(saveNum);
 	CopyUtf8(hero_names[saveNum], heroinfo->name, sizeof(hero_names[saveNum]));
 
 	Player &player = Players[0];
@@ -778,6 +903,7 @@ bool pfile_delete_save(_uiheroinfo *heroInfo)
 	if (saveNum < MAX_CHARACTERS) {
 		hero_names[saveNum][0] = '\0';
 		RemoveFile(GetSavePath(saveNum).c_str());
+		pfile_remove_autosave(saveNum);
 	}
 	return true;
 }

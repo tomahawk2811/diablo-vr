@@ -58,6 +58,12 @@ struct VrSpellRing {
 	int types[32];
 };
 
+/** A belt potion taken in a hand (Belt Grab): which slot, and which hand, 0 left, 1 right. Slot -1: none. */
+struct VrBeltHold {
+	int slot;
+	int hand;
+};
+
 /** Distances of the clip planes, for whoever submits the depth image. */
 constexpr float VrNearPlane = 0.05F;
 constexpr float VrFarPlane = 400.0F;
@@ -76,6 +82,9 @@ float VrWorldTileSize();
 
 /** Whether a person can stand at this world position (walkable tiles). */
 bool VrWorldCanStand(float x, float z);
+
+/** The level's `index`-th doorway built in 3D, for debug cameras. False when it has fewer. */
+bool VrWorldBuiltDoorway(int index, int &tileX, int &tileY, bool &alongX);
 
 /** Whether the character is free to be moved (standing or walking, not in a swing, a cast or a blow). */
 bool VrWorldPlayerCanGlide();
@@ -98,6 +107,11 @@ bool VrWorldPick(const float origin[3], const float direction[3], int &tileX, in
  * Reads the game's state into the scene for this frame. The head pose turns sprites towards the
  * viewer and decides what can be seen at all; hands are in world space; `pointer` draws the aim beam.
  */
+/**
+ * The time the frame about to be built is shown at, in seconds from any fixed start. Without it
+ * (no headset: the offscreen renderer) the scene runs on the game's millisecond clock.
+ */
+void VrWorldSetClock(float seconds);
 void VrWorldUpdate(const float headPosition[3], const float headOrientation[4], const VrHandPose &leftHand, const VrHandPose &rightHand, bool pointerValid, const float pointerHit[3]);
 
 /** Draws the scene of the last VrWorldUpdate, all views in one go. All targets are `width` x `height`. */
@@ -130,6 +144,7 @@ void VrWorldSetVignette(float strength);
 
 /** The left hand's speedbook as the input layer has it this frame. */
 void VrWorldSetSpellRing(const VrSpellRing &ring);
+void VrWorldSetBeltHold(const VrBeltHold &hold);
 
 /**
  * Something the hand at `hand` (world space) can take hold of: an object (door, chest, lever,

@@ -12,18 +12,21 @@
 #include <cstdint>
 #include <vector>
 
+#ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
+#endif
 #include <d3d11.h>
 #include <dxgi.h>
+#ifdef _WIN32
 #include <windows.h>
 
 #define XR_USE_PLATFORM_WIN32
-#define XR_USE_GRAPHICS_API_D3D11
-#include <openxr/openxr.h>
-#include <openxr/openxr_platform.h>
+#endif
 
+#include "options.h"
 #include "platform/vr/knob.h"
+#include "platform/vr/xr_d3d11.h"
 
 namespace devilution {
 namespace vr {
@@ -35,6 +38,25 @@ inline const float ScreenWidth = Knob("DEVILUTIONX_VR_SCREEN_WIDTH", 2.6F);
 inline const float PanelDistance = Knob("DEVILUTIONX_VR_PANEL_DISTANCE", 1.1F);
 inline const float PanelWidth = Knob("DEVILUTIONX_VR_PANEL_WIDTH", 1.4F);
 inline const float HudWidth = Knob("DEVILUTIONX_VR_HUD_WIDTH", 0.6F);
+// The settings page (options.h VrOptions), read live: changes there apply at once.
+inline const VrOptions &Settings()
+{
+	return GetOptions().Vr;
+}
+// The HUD strip split in two on the wrists: life and the left of the belt on the left, mana and
+// the right of the belt on the right. Width of each half.
+inline bool WristHud()
+{
+	return *Settings().hud == VrHudPlace::Wrists;
+}
+inline const float WristWidth = Knob("DEVILUTIONX_VR_WRIST_WIDTH", 0.17F);
+/** The hand that points, holds the weapon and swings; the other one casts and holds the speedbook. */
+inline bool LeftHanded()
+{
+	return *Settings().dominantHand == VrHand::Left;
+}
+// 0: the laser is drawn in the world, under the screen and the panels, as it used to be.
+inline const bool LaserLayer = Knob("DEVILUTIONX_VR_LASER_LAYER", 1) != 0;
 // Eye height used when the runtime has no floor-level tracking space.
 inline const float SeatedEyeHeight = Knob("DEVILUTIONX_VR_EYE_HEIGHT", 1.65F);
 // Meters per second of right-hand speed that counts as a weapon swing.
@@ -55,7 +77,7 @@ enum class State : uint8_t {
 
 struct EyeTarget {
 	XrSwapchain swapchain;
-	std::vector<XrSwapchainImageD3D11KHR> images;
+	std::vector<ID3D11Texture2D *> images;
 	std::vector<ID3D11RenderTargetView *> views;
 	int width;
 	int height;
@@ -70,6 +92,10 @@ struct EyeTarget {
 // xr_session.cpp
 extern State state;
 extern bool sessionRunning;
+/** The session has the wearer's attention: the headset is on and the system shows nothing over the game. */
+extern bool sessionFocused;
+/** It has had it at least once since it began. */
+extern bool sessionWasFocused;
 extern std::atomic<int> initResult;
 extern size_t runtimeIndex;
 extern XrInstance instance;
@@ -80,13 +106,15 @@ extern XrSpace viewSpace;
 extern ID3D11Device *device;
 extern ID3D11DeviceContext *context;
 extern XrSwapchain swapchain;
-extern std::vector<XrSwapchainImageD3D11KHR> swapchainImages;
+extern std::vector<ID3D11Texture2D *> swapchainImages;
 extern int swapchainWidth;
 extern int swapchainHeight;
 extern int64_t swapchainFormat;
 extern Uint32 swapchainSdlFormat;
 extern EyeTarget eyes[2];
 extern float floorOffset;
+/** The runtime knows the Steam Frame's controllers (XR_VALVE_frame_controller_interaction). */
+extern bool hasFrameControllers;
 /** SDL tick at which the running session began. */
 extern Uint32 sessionStartTick;
 
@@ -104,6 +132,10 @@ void PollEvents();
 void SessionLost(const char *reason);
 bool UploadFrame(SDL_Surface *surface);
 void Cleanup();
+
+// vr.cpp
+/** Pauses the game while the session is out of focus, and lets it go on when focus is back. */
+void UpdateFocusPause();
 
 // vr.cpp: where the 2D frame and the world sit relative to the tracking space.
 extern XrPosef screenPose;
@@ -131,12 +163,48 @@ extern bool worldPointerValid;
 extern float worldPointerHit[3];
 extern bool freeValid;
 
+/** A controller's aim pose (or, with DEVILUTIONX_VR_DEBUG_HANDS, a stand-in while it is not tracked). */
+bool LocateHand(Hand hand, XrTime time, XrPosef &pose, XrSpaceVelocity *velocity = nullptr);
 bool InitActions();
+/** The runtime bound another kind of controller: note which. */
+void ControllersChanged();
+/** Anything that needs the 2D frame in view: panels, dialogs, shops, menus, the automap. */
+bool UiOpen();
 bool InitVirtualPad();
 void SelfCheck();
 void SetKey(bool &isDown, bool down, SDL_Keycode key);
 void SyncFreePosition();
 void UpdateInput(XrTime time, float screenHeight);
+/** A buzz on one hand, scaled by the Haptics setting. */
+void Pulse(Hand hand, float amplitude, int milliseconds);
+
+// xr_haptics.cpp
+/** Buzzes for what the game did this frame: blows, potions, pickups, objects used, the interface. */
+void UpdateHaptics(Hand main, Hand off, bool onPanel, Hand pointingHand, bool mouseDown);
+
+// xr_laser.cpp
+/** The laser this frame, in tracking space: from the pointing hand to what it hits. */
+struct LaserPointer {
+	bool visible;
+	/** It lands on the screen or a panel, where a dot shows the spot. */
+	bool onQuad;
+	/** What it points at reacts to the trigger: an item, a door, a chest, someone to talk to. */
+	bool active;
+	XrVector3f from;
+	XrVector3f to;
+};
+extern LaserPointer laser;
+/** The player's arrow on the automap held in the left hand: drawn big over the game's own. */
+struct MapArrow {
+	bool visible;
+	XrPosef pose;
+};
+extern MapArrow mapArrow;
+/** Fills a quad layer for the map arrow, to go over the map. False when there is none. */
+bool MapArrowLayer(XrCompositionLayerQuad &layer);
+/** Fills up to two quad layers for the laser, to go over every other layer. Returns how many. */
+uint32_t LaserLayers(XrTime time, XrCompositionLayerQuad layers[2]);
+void ReleaseLaser();
 
 // xr_frame.cpp
 bool RenderWorld(XrTime time, XrCompositionLayerProjectionView projectionViews[2]);
@@ -158,6 +226,7 @@ void RenderMirror();
 void ReleaseMirror();
 
 // debug/offscreen.cpp
+void EnterLevel(int level);
 void DebugOffscreen(const char *directory);
 void DebugBench(int level, const char *directory);
 
